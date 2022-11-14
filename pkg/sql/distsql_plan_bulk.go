@@ -62,7 +62,7 @@ func (dsp *DistSQLPlanner) setupAllNodesPlanningSystem(
 	instances := make([]sqlinstance.InstanceInfo, 0, len(planCtx.nodeStatuses))
 	for nodeID, status := range planCtx.nodeStatuses {
 		if status == NodeOK {
-			nodes = append(nodes, nodeID)
+			instances = append(instances, sqlinstance.InstanceInfo{InstanceID: nodeID})
 		}
 	}
 

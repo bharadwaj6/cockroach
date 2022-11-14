@@ -85,8 +85,9 @@ func distImport(
 		// TODO(bharadwaj6): hardcode a single region until more clarity on how this should be done
 		sqlInstanceIDs := make([]base.SQLInstanceID, len(instanceInfos))
 		for i := range instanceInfos {
-			if i.Locality == "us-west" {
-				sqlInstanceIDs.apend(i.InstanceID)
+			testLocality := roachpb.Locality{roachpb.Tiers: []roachpb.Tier{{roachpb.Key: "region", roachpb.Value: "us-east4"}}}
+			if instanceInfos[i].Locality == testLocality {
+				sqlInstanceIDs = append(sqlInstanceIDs, instanceInfos[i].InstanceID)
 			}
 		}
 

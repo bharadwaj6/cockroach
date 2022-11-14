@@ -1275,7 +1275,7 @@ func (dsp *DistSQLPlanner) getSQLInstanceIDForKVNodeIDSystem(
 	ctx context.Context, planCtx *PlanningCtx, nodeID roachpb.NodeID,
 ) base.SQLInstanceID {
 	sqlInstanceID := base.SQLInstanceID(nodeID)
-	status := dsp.checkInstanceHealthAndVersionSystem(ctx, planCtx, sqlInstanceID)
+	status := dsp.checkInstanceHealthAndVersionSystem(ctx, planCtx, sqlinstance.InstanceInfo{InstanceID: sqlInstanceID})
 	// If the node is unhealthy or its DistSQL version is incompatible, use the
 	// gateway to process this span instead of the unhealthy host. An empty
 	// address indicates an unhealthy host.
