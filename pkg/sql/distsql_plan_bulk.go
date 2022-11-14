@@ -12,6 +12,7 @@ package sql
 
 import (
 	"context"
+	"github.com/cockroachdb/cockroach/pkg/sql/sqlinstance"
 	"time"
 
 	"github.com/cockroachdb/cockroach/pkg/base"
@@ -59,6 +60,44 @@ func (dsp *DistSQLPlanner) setupAllNodesPlanningSystem(
 			nodes = append(nodes, nodeID)
 		}
 	}
+	return planCtx, nodes, nil
+}
+
+// setupAllNodesPlanningSystem creates a planCtx and returns all nodes available
+// in a system tenant.
+func (dsp *DistSQLPlanner) setupAllNodesPlanningSystem2(
+	ctx context.Context, evalCtx *extendedEvalContext, execCfg *ExecutorConfig,
+) (*PlanningCtx, []sqlinstance.InstanceInfo, error) {
+	planCtx := dsp.NewPlanningCtx(ctx, evalCtx, nil /* planner */, nil, /* txn */
+		DistributionTypeAlways)
+
+	ss, err := execCfg.NodesStatusServer.OptionalNodesStatusServer(47900)
+	if err != nil {
+		return planCtx, []sqlinstance.InstanceInfo{dsp.gatewayInstanceId}, nil //nolint:returnerrcheck
+	}
+	resp, err := ss.ListNodesInternal(ctx, &serverpb.NodesRequest{})
+	if err != nil {
+		return nil, nil, err
+	}
+	// Because we're not going through the normal pathways, we have to set up the
+	// planCtx.nodeStatuses map ourselves. checkInstanceHealthAndVersionSystem() will
+	// populate it.
+	for _, node := range resp.Nodes {
+		_ /* NodeStatus */ = dsp.checkInstanceHealthAndVersionSystem(ctx, planCtx, base.SQLInstanceID(node.Desc.NodeID))
+	}
+	nodes := make([]base.SQLInstanceID, 0, len(planCtx.nodeStatuses))
+	for nodeID, status := range planCtx.nodeStatuses {
+		if status == NodeOK {
+			nodes = append(nodes, nodeID)
+		}
+	}
+
+	base.SQLInstanceID()
+
+	new_nodes = make([]node.)
+	for nodeID, status := range planCtx.
+
+
 	return planCtx, nodes, nil
 }
 

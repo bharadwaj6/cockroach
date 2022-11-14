@@ -88,9 +88,11 @@ type DistSQLPlanner struct {
 	st *cluster.Settings
 	// The SQLInstanceID of the gateway node that initiated this query.
 	gatewaySQLInstanceID base.SQLInstanceID
-	stopper              *stop.Stopper
-	distSQLSrv           *distsql.ServerImpl
-	spanResolver         physicalplan.SpanResolver
+	// The InstanceInfo of the gateway instance that initiated this query
+	gatewayInstanceId sqlinstance.InstanceInfo
+	stopper           *stop.Stopper
+	distSQLSrv        *distsql.ServerImpl
+	spanResolver      physicalplan.SpanResolver
 
 	// runnerCoordinator is used to send out requests (for running SetupFlow
 	// RPCs) to a pool of workers.
@@ -1052,22 +1054,44 @@ func (dsp *DistSQLPlanner) nodeVersionIsCompatibleSystem(sqlInstanceID base.SQLI
 // checkInstanceHealthAndVersionSystem returns information about a node's health
 // and compatibility. The info is also recorded in planCtx.nodeStatuses. It
 // should only be used by the system tenant.
+//func (dsp *DistSQLPlanner) checkInstanceHealthAndVersionSystem(
+//	ctx context.Context, planCtx *PlanningCtx, sqlInstanceID base.SQLInstanceID,
+//) NodeStatus {
+//	if status, ok := planCtx.nodeStatuses[sqlInstanceID]; ok {
+//		return status
+//	}
+//
+//	var status NodeStatus
+//	if err := dsp.nodeHealth.checkSystem(ctx, sqlInstanceID); err != nil {
+//		status = NodeUnhealthy
+//	} else if !dsp.nodeVersionIsCompatibleSystem(sqlInstanceID) {
+//		status = NodeDistSQLVersionIncompatible
+//	} else {
+//		status = NodeOK
+//	}
+//	planCtx.nodeStatuses[sqlInstanceID] = status
+//	return status
+//}
+
+// checkInstanceHealthAndVersionSystem returns information about a node's health
+// and compatibility. The info is also recorded in planCtx.nodeStatuses. It
+// should only be used by the system tenant.
 func (dsp *DistSQLPlanner) checkInstanceHealthAndVersionSystem(
-	ctx context.Context, planCtx *PlanningCtx, sqlInstanceID base.SQLInstanceID,
+	ctx context.Context, planCtx *PlanningCtx, sqlInstanceInfo sqlinstance.InstanceInfo,
 ) NodeStatus {
-	if status, ok := planCtx.nodeStatuses[sqlInstanceID]; ok {
+	if status, ok := planCtx.nodeStatuses[sqlInstanceInfo.InstanceID]; ok {
 		return status
 	}
 
 	var status NodeStatus
-	if err := dsp.nodeHealth.checkSystem(ctx, sqlInstanceID); err != nil {
+	if err := dsp.nodeHealth.checkSystem(ctx, sqlInstanceInfo.InstanceID); err != nil {
 		status = NodeUnhealthy
-	} else if !dsp.nodeVersionIsCompatibleSystem(sqlInstanceID) {
+	} else if !dsp.nodeVersionIsCompatibleSystem(sqlInstanceInfo.InstanceID) {
 		status = NodeDistSQLVersionIncompatible
 	} else {
 		status = NodeOK
 	}
-	planCtx.nodeStatuses[sqlInstanceID] = status
+	planCtx.nodeStatuses[sqlInstanceInfo.InstanceID] = status
 	return status
 }
 
