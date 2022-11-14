@@ -75,9 +75,19 @@ func distImport(
 	makePlan := func(ctx context.Context, dsp *sql.DistSQLPlanner) (*sql.PhysicalPlan, *sql.PlanningCtx, error) {
 		evalCtx := execCtx.ExtendedEvalContext()
 
-		planCtx, sqlInstanceIDs, err := dsp.SetupAllNodesPlanning(ctx, evalCtx, execCtx.ExecCfg())
+		planCtx, instanceInfos, err := dsp.SetupAllNodesPlanning(ctx, evalCtx, execCtx.ExecCfg())
+
 		if err != nil {
 			return nil, nil, err
+		}
+
+		// Filter the sqlInstanceIDs slice before going for shuffle operation on it.
+		// TODO(bharadwaj6): hardcode a single region until more clarity on how this should be done
+		sqlInstanceIDs := make([]base.SQLInstanceID, len(instanceInfos))
+		for i := range instanceInfos {
+			if i.Locality == "us-west" {
+				sqlInstanceIDs.apend(i.InstanceID)
+			}
 		}
 
 		r := rand.New(rand.NewSource(int64(job.ID())))
