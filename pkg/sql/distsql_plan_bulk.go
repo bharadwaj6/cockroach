@@ -34,37 +34,6 @@ func (dsp *DistSQLPlanner) SetupAllNodesPlanning(
 
 // setupAllNodesPlanningSystem creates a planCtx and returns all nodes available
 // in a system tenant.
-//func (dsp *DistSQLPlanner) setupAllNodesPlanningSystem(
-//	ctx context.Context, evalCtx *extendedEvalContext, execCfg *ExecutorConfig,
-//) (*PlanningCtx, []base.SQLInstanceID, error) {
-//	planCtx := dsp.NewPlanningCtx(ctx, evalCtx, nil /* planner */, nil, /* txn */
-//		DistributionTypeAlways)
-//
-//	ss, err := execCfg.NodesStatusServer.OptionalNodesStatusServer(47900)
-//	if err != nil {
-//		return planCtx, []base.SQLInstanceID{dsp.gatewaySQLInstanceID}, nil //nolint:returnerrcheck
-//	}
-//	resp, err := ss.ListNodesInternal(ctx, &serverpb.NodesRequest{})
-//	if err != nil {
-//		return nil, nil, err
-//	}
-//	// Because we're not going through the normal pathways, we have to set up the
-//	// planCtx.nodeStatuses map ourselves. checkInstanceHealthAndVersionSystem() will
-//	// populate it.
-//	for _, node := range resp.Nodes {
-//		_ /* NodeStatus */ = dsp.checkInstanceHealthAndVersionSystem(ctx, planCtx, base.SQLInstanceID(node.Desc.NodeID))
-//	}
-//	nodes := make([]base.SQLInstanceID, 0, len(planCtx.nodeStatuses))
-//	for nodeID, status := range planCtx.nodeStatuses {
-//		if status == NodeOK {
-//			nodes = append(nodes, nodeID)
-//		}
-//	}
-//	return planCtx, nodes, nil
-//}
-
-// setupAllNodesPlanningSystem creates a planCtx and returns all nodes available
-// in a system tenant.
 func (dsp *DistSQLPlanner) setupAllNodesPlanningSystem(
 	ctx context.Context, evalCtx *extendedEvalContext, execCfg *ExecutorConfig,
 ) (*PlanningCtx, []sqlinstance.InstanceInfo, error) {
@@ -73,7 +42,7 @@ func (dsp *DistSQLPlanner) setupAllNodesPlanningSystem(
 
 	ss, err := execCfg.NodesStatusServer.OptionalNodesStatusServer(47900)
 	if err != nil {
-		return planCtx, []sqlinstance.InstanceInfo{dsp.gatewayInstanceId}, nil //nolint:returnerrcheck
+		return planCtx, []sqlinstance.InstanceInfo{dsp.gatewayInstanceInfo}, nil //nolint:returnerrcheck
 	}
 	resp, err := ss.ListNodesInternal(ctx, &serverpb.NodesRequest{})
 	if err != nil {
@@ -102,25 +71,6 @@ func (dsp *DistSQLPlanner) setupAllNodesPlanningSystem(
 
 // setupAllNodesPlanningTenant creates a planCtx and returns all nodes available
 // in a non-system tenant.
-//func (dsp *DistSQLPlanner) setupAllNodesPlanningTenant(
-//	ctx context.Context, evalCtx *extendedEvalContext, execCfg *ExecutorConfig,
-//) (*PlanningCtx, []base.SQLInstanceID, error) {
-//	if dsp.sqlAddressResolver == nil {
-//		return nil, nil, errors.New("sql instance provider not available in multi-tenant environment")
-//	}
-//	planCtx := dsp.NewPlanningCtx(ctx, evalCtx, nil /* planner */, nil, /* txn */
-//		DistributionTypeAlways)
-//	pods, err := dsp.sqlAddressResolver.GetAllInstances(ctx)
-//	if err != nil {
-//		return nil, nil, err
-//	}
-//	sqlInstanceIDs := make([]base.SQLInstanceID, len(pods))
-//	for i, pod := range pods {
-//		sqlInstanceIDs[i] = pod.InstanceID
-//	}
-//	return planCtx, sqlInstanceIDs, nil
-//}
-
 func (dsp *DistSQLPlanner) setupAllNodesPlanningTenant(
 	ctx context.Context, evalCtx *extendedEvalContext, execCfg *ExecutorConfig,
 ) (*PlanningCtx, []sqlinstance.InstanceInfo, error) {
