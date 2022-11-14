@@ -25,7 +25,7 @@ import (
 // map for all nodes. It returns all nodes that can be used for planning.
 func (dsp *DistSQLPlanner) SetupAllNodesPlanning(
 	ctx context.Context, evalCtx *extendedEvalContext, execCfg *ExecutorConfig,
-) (*PlanningCtx, []base.SQLInstanceID, error) {
+) (*PlanningCtx, []sqlinstance.InstanceInfo, error) {
 	if dsp.codec.ForSystemTenant() {
 		return dsp.setupAllNodesPlanningSystem(ctx, evalCtx, execCfg)
 	}
@@ -34,38 +34,38 @@ func (dsp *DistSQLPlanner) SetupAllNodesPlanning(
 
 // setupAllNodesPlanningSystem creates a planCtx and returns all nodes available
 // in a system tenant.
-func (dsp *DistSQLPlanner) setupAllNodesPlanningSystem(
-	ctx context.Context, evalCtx *extendedEvalContext, execCfg *ExecutorConfig,
-) (*PlanningCtx, []base.SQLInstanceID, error) {
-	planCtx := dsp.NewPlanningCtx(ctx, evalCtx, nil /* planner */, nil, /* txn */
-		DistributionTypeAlways)
-
-	ss, err := execCfg.NodesStatusServer.OptionalNodesStatusServer(47900)
-	if err != nil {
-		return planCtx, []base.SQLInstanceID{dsp.gatewaySQLInstanceID}, nil //nolint:returnerrcheck
-	}
-	resp, err := ss.ListNodesInternal(ctx, &serverpb.NodesRequest{})
-	if err != nil {
-		return nil, nil, err
-	}
-	// Because we're not going through the normal pathways, we have to set up the
-	// planCtx.nodeStatuses map ourselves. checkInstanceHealthAndVersionSystem() will
-	// populate it.
-	for _, node := range resp.Nodes {
-		_ /* NodeStatus */ = dsp.checkInstanceHealthAndVersionSystem(ctx, planCtx, base.SQLInstanceID(node.Desc.NodeID))
-	}
-	nodes := make([]base.SQLInstanceID, 0, len(planCtx.nodeStatuses))
-	for nodeID, status := range planCtx.nodeStatuses {
-		if status == NodeOK {
-			nodes = append(nodes, nodeID)
-		}
-	}
-	return planCtx, nodes, nil
-}
+//func (dsp *DistSQLPlanner) setupAllNodesPlanningSystem(
+//	ctx context.Context, evalCtx *extendedEvalContext, execCfg *ExecutorConfig,
+//) (*PlanningCtx, []base.SQLInstanceID, error) {
+//	planCtx := dsp.NewPlanningCtx(ctx, evalCtx, nil /* planner */, nil, /* txn */
+//		DistributionTypeAlways)
+//
+//	ss, err := execCfg.NodesStatusServer.OptionalNodesStatusServer(47900)
+//	if err != nil {
+//		return planCtx, []base.SQLInstanceID{dsp.gatewaySQLInstanceID}, nil //nolint:returnerrcheck
+//	}
+//	resp, err := ss.ListNodesInternal(ctx, &serverpb.NodesRequest{})
+//	if err != nil {
+//		return nil, nil, err
+//	}
+//	// Because we're not going through the normal pathways, we have to set up the
+//	// planCtx.nodeStatuses map ourselves. checkInstanceHealthAndVersionSystem() will
+//	// populate it.
+//	for _, node := range resp.Nodes {
+//		_ /* NodeStatus */ = dsp.checkInstanceHealthAndVersionSystem(ctx, planCtx, base.SQLInstanceID(node.Desc.NodeID))
+//	}
+//	nodes := make([]base.SQLInstanceID, 0, len(planCtx.nodeStatuses))
+//	for nodeID, status := range planCtx.nodeStatuses {
+//		if status == NodeOK {
+//			nodes = append(nodes, nodeID)
+//		}
+//	}
+//	return planCtx, nodes, nil
+//}
 
 // setupAllNodesPlanningSystem creates a planCtx and returns all nodes available
 // in a system tenant.
-func (dsp *DistSQLPlanner) setupAllNodesPlanningSystem2(
+func (dsp *DistSQLPlanner) setupAllNodesPlanningSystem(
 	ctx context.Context, evalCtx *extendedEvalContext, execCfg *ExecutorConfig,
 ) (*PlanningCtx, []sqlinstance.InstanceInfo, error) {
 	planCtx := dsp.NewPlanningCtx(ctx, evalCtx, nil /* planner */, nil, /* txn */
@@ -83,29 +83,47 @@ func (dsp *DistSQLPlanner) setupAllNodesPlanningSystem2(
 	// planCtx.nodeStatuses map ourselves. checkInstanceHealthAndVersionSystem() will
 	// populate it.
 	for _, node := range resp.Nodes {
-		_ /* NodeStatus */ = dsp.checkInstanceHealthAndVersionSystem(ctx, planCtx, base.SQLInstanceID(node.Desc.NodeID))
+		_ /* NodeStatus */ = dsp.checkInstanceHealthAndVersionSystem(
+			ctx, planCtx, sqlinstance.InstanceInfo{
+				InstanceID: base.SQLInstanceID(node.Desc.NodeID),
+				Locality:   node.Desc.Locality,
+			},
+		)
 	}
-	nodes := make([]base.SQLInstanceID, 0, len(planCtx.nodeStatuses))
+	instances := make([]sqlinstance.InstanceInfo, 0, len(planCtx.nodeStatuses))
 	for nodeID, status := range planCtx.nodeStatuses {
 		if status == NodeOK {
 			nodes = append(nodes, nodeID)
 		}
 	}
 
-	base.SQLInstanceID()
-
-	new_nodes = make([]node.)
-	for nodeID, status := range planCtx.
-
-
-	return planCtx, nodes, nil
+	return planCtx, instances, nil
 }
 
 // setupAllNodesPlanningTenant creates a planCtx and returns all nodes available
 // in a non-system tenant.
+//func (dsp *DistSQLPlanner) setupAllNodesPlanningTenant(
+//	ctx context.Context, evalCtx *extendedEvalContext, execCfg *ExecutorConfig,
+//) (*PlanningCtx, []base.SQLInstanceID, error) {
+//	if dsp.sqlAddressResolver == nil {
+//		return nil, nil, errors.New("sql instance provider not available in multi-tenant environment")
+//	}
+//	planCtx := dsp.NewPlanningCtx(ctx, evalCtx, nil /* planner */, nil, /* txn */
+//		DistributionTypeAlways)
+//	pods, err := dsp.sqlAddressResolver.GetAllInstances(ctx)
+//	if err != nil {
+//		return nil, nil, err
+//	}
+//	sqlInstanceIDs := make([]base.SQLInstanceID, len(pods))
+//	for i, pod := range pods {
+//		sqlInstanceIDs[i] = pod.InstanceID
+//	}
+//	return planCtx, sqlInstanceIDs, nil
+//}
+
 func (dsp *DistSQLPlanner) setupAllNodesPlanningTenant(
 	ctx context.Context, evalCtx *extendedEvalContext, execCfg *ExecutorConfig,
-) (*PlanningCtx, []base.SQLInstanceID, error) {
+) (*PlanningCtx, []sqlinstance.InstanceInfo, error) {
 	if dsp.sqlAddressResolver == nil {
 		return nil, nil, errors.New("sql instance provider not available in multi-tenant environment")
 	}
@@ -115,11 +133,12 @@ func (dsp *DistSQLPlanner) setupAllNodesPlanningTenant(
 	if err != nil {
 		return nil, nil, err
 	}
-	sqlInstanceIDs := make([]base.SQLInstanceID, len(pods))
+	instanceInfos := make([]sqlinstance.InstanceInfo, len(pods))
 	for i, pod := range pods {
-		sqlInstanceIDs[i] = pod.InstanceID
+		instanceInfos[i] = sqlinstance.InstanceInfo{InstanceID: pod.InstanceID, InstanceAddr: pod.InstanceAddr}
 	}
-	return planCtx, sqlInstanceIDs, nil
+
+	return planCtx, instanceInfos, nil
 }
 
 // PhysicalPlanMaker describes a function that makes a physical plan.
