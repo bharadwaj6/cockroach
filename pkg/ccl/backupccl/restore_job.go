@@ -1205,7 +1205,7 @@ func createImportingDescriptors(
 					default:
 						return errors.AssertionFailedf("unknown tenant state %v", tenant)
 					}
-					if err := sql.CreateTenantRecord(ctx, p.ExecCfg(), txn, &tenant, initialTenantZoneConfig); err != nil {
+					if _, err := sql.CreateTenantRecord(ctx, p.ExecCfg(), txn, &tenant, initialTenantZoneConfig); err != nil {
 						return err
 					}
 				}
@@ -1533,7 +1533,7 @@ func (r *restoreResumer) doResume(ctx context.Context, execCtx interface{}) erro
 	}
 
 	for _, tenant := range details.Tenants {
-		to := roachpb.MakeTenantID(tenant.ID)
+		to := roachpb.MustMakeTenantID(tenant.ID)
 		from := to
 		if details.PreRewriteTenantId != nil {
 			from = *details.PreRewriteTenantId

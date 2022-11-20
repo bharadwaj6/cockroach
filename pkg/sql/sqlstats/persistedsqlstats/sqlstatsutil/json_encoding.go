@@ -267,7 +267,9 @@ func BuildTxnStatisticsJSON(statistics *roachpb.CollectedTransactionStatistics) 
 //	  "properties": {
 //	    "stmtType":             { "type": "string" },
 //	    "query":                { "type": "string" },
+//	    "fingerprintID":        { "type": "string" },
 //	    "querySummary":         { "type": "string" },
+//	    "formattedQuery":       { "type": "string" },
 //	    "implicitTxn":          { "type": "boolean" },
 //	    "distSQLCount":         { "type": "number" },
 //	    "failedCount":          { "type": "number" },
@@ -275,6 +277,12 @@ func BuildTxnStatisticsJSON(statistics *roachpb.CollectedTransactionStatistics) 
 //	    "fullScanCount":        { "type": "number" },
 //	    "totalCount":           { "type": "number" },
 //	    "db":                   {
+//	   		"type": "array",
+//	   		"items": {
+//	   		  "type": "string"
+//	   		}
+//	  	},
+//	    "appNames":             {
 //	   		"type": "array",
 //	   		"items": {
 //	   		  "type": "string"
@@ -298,12 +306,14 @@ func BuildStmtDetailsMetadataJSON(
 //	  "type": "object",
 //	  [{
 //	    "blockingTxnID": { "type": "string" },
-//	    "durationMs":    { "type": "number" },
-//	    "indexID":       { "type": "number" },
-//	    "tableID":       { "type": "number" }
+//	    "durationInMs":  { "type": "number" },
+//	    "schemaName":    { "type": "string" },
+//	    "databaseName":  { "type": "string" },
+//	    "tableName":     { "type": "string" },
+//	    "indexName":     { "type": "string" }
 //	  }]
 //	}
-func BuildContentionEventsJSON(events []roachpb.ContentionEvent) (json.JSON, error) {
+func BuildContentionEventsJSON(events []ContentionEventWithNames) (json.JSON, error) {
 	return (*contentionEvents)(&events).encodeJSON()
 }
 

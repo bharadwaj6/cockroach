@@ -36,6 +36,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/allocator/storepool"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/closedts/ctpb"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/closedts/sidetransport"
+	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/kvserverbase"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/liveness"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/liveness/livenesspb"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/protectedts"
@@ -535,7 +536,7 @@ func NewServer(cfg Config, stopper *stop.Stopper) (*Server, error) {
 				if !serverrangefeed.RangefeedBudgetsEnabled.Get(&st.SV) {
 					return 0
 				}
-				if raftCmdLimit := kvserver.MaxCommandSize.Get(&st.SV); raftCmdLimit > limit {
+				if raftCmdLimit := kvserverbase.MaxCommandSize.Get(&st.SV); raftCmdLimit > limit {
 					return raftCmdLimit
 				}
 				return limit
@@ -1637,15 +1638,7 @@ func (s *Server) PreStart(ctx context.Context) error {
 		}
 	}
 	// Start garbage collecting system events.
-	//
-	// NB: As written, this falls awkwardly between SQL and KV. KV is used only
-	// to make sure this runs only on one node. SQL is used to actually GC. We
-	// count it as a KV operation since it grooms cluster-wide data, not
-	// something associated to SQL tenants.
-	s.startSystemLogsGC(workersCtx)
-
-	// Begin an async task to periodically purge old sessions in the system.web_sessions table.
-	if err = startPurgeOldSessions(workersCtx, s.authentication); err != nil {
+	if err := startSystemLogsGC(workersCtx, s.sqlServer); err != nil {
 		return err
 	}
 
@@ -1663,7 +1656,6 @@ func (s *Server) PreStart(ctx context.Context) error {
 			admin:            s.admin,
 			status:           s.status,
 			promRuleExporter: s.promRuleExporter,
-			tenantID:         roachpb.SystemTenantID,
 			sqlServer:        s.sqlServer,
 			db:               s.db,
 		}), /* apiServer */

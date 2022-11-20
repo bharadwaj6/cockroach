@@ -154,7 +154,6 @@ type SQLServer struct {
 	sessionRegistry        *sql.SessionRegistry
 	closedSessionCache     *sql.ClosedSessionCache
 	jobRegistry            *jobs.Registry
-	startupMigrationsMgr   *startupmigrations.Manager
 	statsRefresher         *stats.Refresher
 	temporaryObjectCleaner *sql.TemporaryObjectCleaner
 	internalMemMetrics     sql.MemoryMetrics
@@ -742,6 +741,7 @@ func newSQLServer(ctx context.Context, cfg sqlServerArgs) (*SQLServer, error) {
 		SQLSQLResponseAdmissionQ: cfg.sqlSQLResponseAdmissionQ,
 		CollectionFactory:        collectionFactory,
 		ExternalIORecorder:       cfg.costController,
+		TenantCostController:     cfg.costController,
 		RangeStatsFetcher:        rangeStatsFetcher,
 	}
 	cfg.TempStorageConfig.Mon.SetMetrics(distSQLMetrics.CurDiskBytesCount, distSQLMetrics.MaxDiskBytesHist)
@@ -1413,7 +1413,6 @@ func (s *SQLServer) preStart(
 		s.execCfg.Settings,
 		s.jobRegistry,
 	)
-	s.startupMigrationsMgr = startupMigrationsMgr // only for testing via TestServer
 
 	if err := s.jobRegistry.Start(ctx, stopper); err != nil {
 		return err

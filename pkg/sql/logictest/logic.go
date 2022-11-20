@@ -1231,6 +1231,7 @@ func (t *logicTest) newCluster(
 	shouldUseMVCCRangeTombstonesForPointDeletes := useMVCCRangeTombstonesForPointDeletes && !serverArgs.DisableUseMVCCRangeTombstonesForPointDeletes
 	ignoreMVCCRangeTombstoneErrors := supportsMVCCRangeTombstones &&
 		(globalMVCCRangeTombstone || shouldUseMVCCRangeTombstonesForPointDeletes)
+	useSmallEngineBlocks := smallEngineBlocks && !serverArgs.DisableSmallEngineBlocks
 
 	params := base.TestClusterArgs{
 		ServerArgs: base.TestServerArgs{
@@ -1249,7 +1250,7 @@ func (t *logicTest) newCluster(
 						UseRangeTombstonesForPointDeletes: supportsMVCCRangeTombstones &&
 							shouldUseMVCCRangeTombstonesForPointDeletes,
 					},
-					SmallEngineBlocks: smallEngineBlocks,
+					SmallEngineBlocks: useSmallEngineBlocks,
 				},
 				SQLEvalContext: &eval.TestingKnobs{
 					AssertBinaryExprReturnTypes:     true,
@@ -1342,18 +1343,16 @@ func (t *logicTest) newCluster(
 
 			// If we're injecting fake versions, hook up logic to simulate the end
 			// version existing.
-			from := clusterversion.ClusterVersion{Version: cfg.BootstrapVersion}
-			to := clusterversion.ClusterVersion{Version: cfg.BinaryVersion}
-			if len(clusterversion.ListBetween(from, to)) == 0 {
+			if len(clusterversion.ListBetween(cfg.BootstrapVersion, cfg.BinaryVersion)) == 0 {
 				mm, ok := nodeParams.Knobs.UpgradeManager.(*upgrade.TestingKnobs)
 				if !ok {
 					mm = &upgrade.TestingKnobs{}
 					nodeParams.Knobs.UpgradeManager = mm
 				}
 				mm.ListBetweenOverride = func(
-					from, to clusterversion.ClusterVersion,
-				) []clusterversion.ClusterVersion {
-					return []clusterversion.ClusterVersion{to}
+					from, to roachpb.Version,
+				) []roachpb.Version {
+					return []roachpb.Version{to}
 				}
 			}
 		}
@@ -3849,6 +3848,9 @@ type TestServerArgs struct {
 	// If set, then we will disable the metamorphic randomization of
 	// useMVCCRangeTombstonesForPointDeletes variable.
 	DisableUseMVCCRangeTombstonesForPointDeletes bool
+	// If set, then we will disable the metamorphic randomization of
+	// smallEngineBlocks variable.
+	DisableSmallEngineBlocks bool
 }
 
 // RunLogicTests runs logic tests for all files matching the given glob.
