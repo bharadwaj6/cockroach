@@ -282,8 +282,8 @@ func (ca *changeAggregator) Start(ctx context.Context) {
 	}
 
 	ca.eventConsumer, ca.sink, err = newEventConsumer(
-		ctx, ca.flowCtx, feed, ca.frontier.SpanFrontier(), kvFeedHighWater,
-		ca.sink, feed, ca.spec.Select, ca.knobs, ca.metrics, ca.isSinkless())
+		ctx, ca.flowCtx.Cfg, ca.spec, feed, ca.frontier.SpanFrontier(), kvFeedHighWater,
+		ca.sink, ca.metrics, ca.knobs)
 
 	if err != nil {
 		// Early abort in the case that there is an error setting up the consumption.
@@ -446,7 +446,7 @@ func (ca *changeAggregator) close() {
 	}
 	if ca.eventConsumer != nil {
 		if err := ca.eventConsumer.Close(); err != nil {
-			log.Warningf(ca.Ctx, "error closing event consumer: %s", err)
+			log.Warningf(ca.Ctx(), "error closing event consumer: %s", err)
 		}
 	}
 
@@ -454,11 +454,11 @@ func (ca *changeAggregator) close() {
 		// Best effort: context is often cancel by now, so we expect to see an error
 		_ = ca.sink.Close()
 	}
-	ca.memAcc.Close(ca.Ctx)
+	ca.memAcc.Close(ca.Ctx())
 	if ca.kvFeedMemMon != nil {
-		ca.kvFeedMemMon.Stop(ca.Ctx)
+		ca.kvFeedMemMon.Stop(ca.Ctx())
 	}
-	ca.MemMonitor.Stop(ca.Ctx)
+	ca.MemMonitor.Stop(ca.Ctx())
 	ca.InternalClose()
 }
 
@@ -501,7 +501,7 @@ func (ca *changeAggregator) Next() (rowenc.EncDatumRow, *execinfrapb.ProducerMet
 // kvFeed, sends off this event to the event consumer, and flushes the sink
 // if necessary.
 func (ca *changeAggregator) tick() error {
-	event, err := ca.eventProducer.Get(ca.Ctx)
+	event, err := ca.eventProducer.Get(ca.Ctx())
 	if err != nil {
 		return err
 	}
@@ -516,16 +516,16 @@ func (ca *changeAggregator) tick() error {
 			ca.sliMetrics.AdmitLatency.RecordValue(timeutil.Since(event.Timestamp().GoTime()).Nanoseconds())
 		}
 		ca.recentKVCount++
-		return ca.eventConsumer.ConsumeEvent(ca.Ctx, event)
+		return ca.eventConsumer.ConsumeEvent(ca.Ctx(), event)
 	case kvevent.TypeResolved:
 		a := event.DetachAlloc()
-		a.Release(ca.Ctx)
+		a.Release(ca.Ctx())
 		resolved := event.Resolved()
 		if ca.knobs.FilterSpanWithMutation == nil || !ca.knobs.FilterSpanWithMutation(&resolved) {
 			return ca.noteResolvedSpan(resolved)
 		}
 	case kvevent.TypeFlush:
-		return ca.sink.Flush(ca.Ctx)
+		return ca.sink.Flush(ca.Ctx())
 	}
 
 	return nil
@@ -568,7 +568,7 @@ func (ca *changeAggregator) flushFrontier() error {
 	// otherwise, we could lose buffered messages and violate the
 	// at-least-once guarantee. This is also true for checkpointing the
 	// resolved spans in the job progress.
-	if err := ca.sink.Flush(ca.Ctx); err != nil {
+	if err := ca.sink.Flush(ca.Ctx()); err != nil {
 		return err
 	}
 
@@ -608,6 +608,7 @@ func (ca *changeAggregator) emitResolved(batch jobspb.ResolvedSpans) error {
 		rowenc.EncDatum{Datum: tree.DNull}, // key
 		rowenc.EncDatum{Datum: tree.DNull}, // value
 	})
+	ca.metrics.ResolvedMessages.Inc(1)
 
 	ca.recentKVCount = 0
 	return nil
@@ -617,10 +618,6 @@ func (ca *changeAggregator) emitResolved(batch jobspb.ResolvedSpans) error {
 func (ca *changeAggregator) ConsumerClosed() {
 	// The consumer is done, Next() will not be called again.
 	ca.close()
-}
-
-func (ca *changeAggregator) isSinkless() bool {
-	return ca.spec.JobID == 0
 }
 
 const (
@@ -996,8 +993,8 @@ func (cf *changeFrontier) close() {
 			// Best effort: context is often cancel by now, so we expect to see an error
 			_ = cf.sink.Close()
 		}
-		cf.memAcc.Close(cf.Ctx)
-		cf.MemMonitor.Stop(cf.Ctx)
+		cf.memAcc.Close(cf.Ctx())
+		cf.MemMonitor.Stop(cf.Ctx())
 	}
 }
 
@@ -1104,7 +1101,7 @@ func (cf *changeFrontier) noteAggregatorProgress(d rowenc.EncDatum) error {
 		// job progress update closure, but it currently doesn't pass along the info
 		// we'd need to do it that way.
 		if !resolved.Timestamp.IsEmpty() && resolved.Timestamp.Less(cf.highWaterAtStart) {
-			logcrash.ReportOrPanic(cf.Ctx, &cf.flowCtx.Cfg.Settings.SV,
+			logcrash.ReportOrPanic(cf.Ctx(), &cf.flowCtx.Cfg.Settings.SV,
 				`got a span level timestamp %s for %s that is less than the initial high-water %s`,
 				redact.Safe(resolved.Timestamp), resolved.Span, redact.Safe(cf.highWaterAtStart))
 			continue
@@ -1206,7 +1203,7 @@ func (cf *changeFrontier) maybeCheckpointJob(
 		if err != nil {
 			return false, err
 		}
-		cf.js.checkpointCompleted(cf.Ctx, timeutil.Since(checkpointStart))
+		cf.js.checkpointCompleted(cf.Ctx(), timeutil.Since(checkpointStart))
 		return updated, nil
 	}
 
@@ -1224,7 +1221,7 @@ func (cf *changeFrontier) checkpointJobProgress(
 	var updateSkipped error
 	if cf.js.job != nil {
 
-		if err := cf.js.job.Update(cf.Ctx, nil, func(
+		if err := cf.js.job.Update(cf.Ctx(), nil, func(
 			txn *kv.Txn, md jobs.JobMetadata, ju *jobs.JobUpdater,
 		) error {
 			// If we're unable to update the job due to the job state, such as during
@@ -1249,8 +1246,8 @@ func (cf *changeFrontier) checkpointJobProgress(
 			if !changefeedbase.ActiveProtectedTimestampsEnabled.Get(&cf.flowCtx.Cfg.Settings.SV) {
 				timestampManager = cf.deprecatedManageProtectedTimestamps
 			}
-			if err := timestampManager(cf.Ctx, txn, changefeedProgress); err != nil {
-				log.Warningf(cf.Ctx, "error managing protected timestamp record: %v", err)
+			if err := timestampManager(cf.Ctx(), txn, changefeedProgress); err != nil {
+				log.Warningf(cf.Ctx(), "error managing protected timestamp record: %v", err)
 				return err
 			}
 
@@ -1278,7 +1275,7 @@ func (cf *changeFrontier) checkpointJobProgress(
 	}
 
 	if updateSkipped != nil {
-		log.Warningf(cf.Ctx, "skipping changefeed checkpoint: %s", updateSkipped)
+		log.Warningf(cf.Ctx(), "skipping changefeed checkpoint: %s", updateSkipped)
 		return false, nil
 	}
 
@@ -1377,7 +1374,7 @@ func (cf *changeFrontier) maybeEmitResolved(newResolved hlc.Timestamp) error {
 	if !shouldEmit {
 		return nil
 	}
-	if err := emitResolvedTimestamp(cf.Ctx, cf.encoder, cf.sink, newResolved); err != nil {
+	if err := emitResolvedTimestamp(cf.Ctx(), cf.encoder, cf.sink, newResolved); err != nil {
 		return err
 	}
 	cf.lastEmitResolved = newResolved.GoTime()
@@ -1416,13 +1413,13 @@ func (cf *changeFrontier) maybeLogBehindSpan(frontierChanged bool) {
 		description = fmt.Sprintf("job %d", cf.spec.JobID)
 	}
 	if frontierChanged && cf.slowLogEveryN.ShouldProcess(now) {
-		log.Infof(cf.Ctx, "%s new resolved timestamp %s is behind by %s",
+		log.Infof(cf.Ctx(), "%s new resolved timestamp %s is behind by %s",
 			description, frontier, resolvedBehind)
 	}
 
 	if cf.slowLogEveryN.ShouldProcess(now) {
 		s := cf.frontier.PeekFrontierSpan()
-		log.Infof(cf.Ctx, "%s span %s is behind by %s", description, s, resolvedBehind)
+		log.Infof(cf.Ctx(), "%s span %s is behind by %s", description, s, resolvedBehind)
 	}
 }
 

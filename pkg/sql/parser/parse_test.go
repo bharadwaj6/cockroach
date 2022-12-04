@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"go/constant"
 	"reflect"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -31,6 +32,8 @@ import (
 	"github.com/cockroachdb/errors"
 	"github.com/stretchr/testify/assert"
 )
+
+var issueLinkRE = regexp.MustCompile("https://go.crdb.dev/issue-v/([0-9]+)/.*")
 
 // TestParseDataDriven verifies that we can parse the supplied SQL and regenerate the SQL
 // string from the syntax tree.
@@ -98,6 +101,7 @@ func TestParseDatadriven(t *testing.T) {
 				if pgerr.Hint != "" {
 					msg += "\nHINT: " + pgerr.Hint
 				}
+				msg = issueLinkRE.ReplaceAllString(msg, "https://go.crdb.dev/issue-v/$1/")
 				return msg
 			}
 			d.Fatalf(t, "unsupported command: %s", d.Cmd)
@@ -546,8 +550,6 @@ func TestUnimplementedSyntax(t *testing.T) {
 		{`CREATE TABLE a(b PG_LSN)`, 0, `pg_lsn`, ``},
 		{`CREATE TABLE a(b POINT)`, 21286, `point`, ``},
 		{`CREATE TABLE a(b POLYGON)`, 21286, `polygon`, ``},
-		{`CREATE TABLE a(b TSQUERY)`, 7821, `tsquery`, ``},
-		{`CREATE TABLE a(b TSVECTOR)`, 7821, `tsvector`, ``},
 		{`CREATE TABLE a(b TXID_SNAPSHOT)`, 0, `txid_snapshot`, ``},
 		{`CREATE TABLE a(b XML)`, 43355, `xml`, ``},
 

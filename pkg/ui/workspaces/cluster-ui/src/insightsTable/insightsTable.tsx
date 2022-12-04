@@ -26,7 +26,6 @@ import { Anchor } from "../anchor";
 import { Link } from "react-router-dom";
 import { performanceTuningRecipes } from "../util";
 import { InsightRecommendation, insightType } from "../insights";
-import { limitText } from "src/util";
 
 const cx = classNames.bind(styles);
 
@@ -45,7 +44,7 @@ type InsightsTableTitleType = {
 };
 
 export const insightsTableTitles: InsightsTableTitleType = {
-  query: () => <span>insightColumnLabels.query</span>,
+  query: () => <span>{insightColumnLabels.query}</span>,
   insights: () => {
     return (
       <Tooltip
@@ -77,10 +76,47 @@ function typeCell(value: string): React.ReactElement {
   return <div className={cx("insight-type")}>{value}</div>;
 }
 
+const StatementExecution = ({
+  rec,
+  disableLink,
+}: {
+  rec: InsightRecommendation;
+  disableLink: boolean;
+}) => (
+  <div className={cx("description-item")}>
+    <span className={cx("label-bold")}>Statement: </span>{" "}
+    {disableLink ? (
+      <div className={cx("inline")}>
+        <Tooltip placement="bottom" content={rec.execution.statement}>
+          {computeOrUseStmtSummary(
+            rec.execution?.statement,
+            rec.execution?.summary,
+          )}
+        </Tooltip>
+      </div>
+    ) : (
+      <StatementLink
+        statementFingerprintID={rec.execution.fingerprintID}
+        statement={rec.execution.statement}
+        statementSummary={rec.execution.summary}
+        implicitTxn={rec.execution.implicit}
+        className="inline"
+      />
+    )}
+  </div>
+);
+
 function descriptionCell(
   insightRec: InsightRecommendation,
-  disableStmtLink?: boolean,
+  showQuery: boolean,
+  disableStmtLink: boolean,
+  isCockroachCloud: boolean,
 ): React.ReactElement {
+  const stmtLink =
+    showQuery || isIndexRec(insightRec) ? (
+      <StatementExecution rec={insightRec} disableLink={disableStmtLink} />
+    ) : null;
+
   const clusterSettingsLink = (
     <>
       {"This threshold can be configured in "}
@@ -90,38 +126,18 @@ function descriptionCell(
       {"."}
     </>
   );
-  const summary = computeOrUseStmtSummary(
-    insightRec.execution?.statement,
-    insightRec.execution?.summary,
-  );
+
+  const indexLink = isCockroachCloud
+    ? `databases/${insightRec.database}/${insightRec.indexDetails?.schema}/${insightRec.indexDetails?.table}/${insightRec.indexDetails?.indexName}`
+    : `database/${insightRec.database}/table/${insightRec.indexDetails?.table}/index/${insightRec.indexDetails?.indexName}`;
+
   switch (insightRec.type) {
     case "CreateIndex":
     case "ReplaceIndex":
     case "AlterIndex":
       return (
         <>
-          <div className={cx("description-item")}>
-            <span className={cx("label-bold")}>Statement Fingerprint: </span>{" "}
-            {disableStmtLink && (
-              <div className={cx("inline")}>
-                <Tooltip
-                  placement="bottom"
-                  content={insightRec.execution.statement}
-                >
-                  {summary}
-                </Tooltip>
-              </div>
-            )}
-            {!disableStmtLink && (
-              <StatementLink
-                statementFingerprintID={insightRec.execution.fingerprintID}
-                statement={insightRec.execution.statement}
-                statementSummary={insightRec.execution.summary}
-                implicitTxn={insightRec.execution.implicit}
-                className={"inline"}
-              />
-            )}
-          </div>
+          {stmtLink}
           <div className={cx("description-item")}>
             <span className={cx("label-bold")}>Recommendation: </span>{" "}
             {insightRec.query}
@@ -133,10 +149,7 @@ function descriptionCell(
         <>
           <div className={cx("description-item")}>
             <span className={cx("label-bold")}>Index: </span>{" "}
-            <Link
-              to={`database/${insightRec.database}/table/${insightRec.indexDetails.table}/index/${insightRec.indexDetails.indexName}`}
-              className={cx("table-link")}
-            >
+            <Link to={indexLink} className={cx("table-link")}>
               {insightRec.indexDetails.indexName}
             </Link>
           </div>
@@ -162,6 +175,7 @@ function descriptionCell(
             <span className={cx("label-bold")}>Time Spent Waiting: </span>{" "}
             {Duration(insightRec.details.duration * 1e6)}
           </div>
+          {stmtLink}
           <div className={cx("description-item")}>
             <span className={cx("label-bold")}>Description: </span>{" "}
             {insightRec.details.description} {clusterSettingsLink}
@@ -175,6 +189,7 @@ function descriptionCell(
             <span className={cx("label-bold")}>Retries: </span>{" "}
             {insightRec.execution.retries}
           </div>
+          {stmtLink}
           <div className={cx("description-item")}>
             <span className={cx("label-bold")}>Description: </span>{" "}
             {insightRec.details.description} {clusterSettingsLink}
@@ -188,6 +203,7 @@ function descriptionCell(
     case "SuboptimalPlan":
       return (
         <>
+          {stmtLink}
           <div className={cx("description-item")}>
             <span className={cx("label-bold")}>Description: </span>{" "}
             {insightRec.details.description}
@@ -203,6 +219,7 @@ function descriptionCell(
     case "PlanRegression":
       return (
         <>
+          {stmtLink}
           <div className={cx("description-item")}>
             <span className={cx("label-bold")}>Description: </span>{" "}
             {insightRec.details.description}
@@ -212,6 +229,7 @@ function descriptionCell(
     case "FailedExecution":
       return (
         <>
+          {stmtLink}
           <div className={cx("description-item")}>
             This execution has failed.
           </div>
@@ -224,6 +242,7 @@ function descriptionCell(
             <span className={cx("label-bold")}>Elapsed Time: </span>
             {Duration(insightRec.details.duration * 1e6)}
           </div>
+          {stmtLink}
           <div className={cx("description-item")}>
             <span className={cx("label-bold")}>Description: </span>{" "}
             {insightRec.details.description} {clusterSettingsLink}
@@ -284,8 +303,20 @@ function actionCell(
   return <></>;
 }
 
+const isIndexRec = (rec: InsightRecommendation) => {
+  switch (rec.type) {
+    case "AlterIndex":
+    case "CreateIndex":
+    case "DropIndex":
+      return true;
+    default:
+      return false;
+  }
+};
+
 export function makeInsightsColumns(
-  hideAction: boolean,
+  isCockroachCloud: boolean,
+  showQuery?: boolean,
   disableStmtLink?: boolean,
 ): ColumnDescriptor<InsightRecommendation>[] {
   return [
@@ -299,20 +330,13 @@ export function makeInsightsColumns(
       name: "details",
       title: insightsTableTitles.details(),
       cell: (item: InsightRecommendation) =>
-        descriptionCell(item, disableStmtLink),
+        descriptionCell(item, showQuery, disableStmtLink, isCockroachCloud),
       sort: (item: InsightRecommendation) => item.type,
-    },
-    {
-      name: "query",
-      title: insightsTableTitles.query(),
-      cell: (item: InsightRecommendation) =>
-        limitText(item.execution?.statement, 100) ?? "N/A",
-      sort: (item: InsightRecommendation) => item.execution?.statement,
     },
     {
       name: "action",
       title: insightsTableTitles.actions(),
-      cell: (item: InsightRecommendation) => actionCell(item, hideAction),
+      cell: (item: InsightRecommendation) => actionCell(item, isCockroachCloud),
     },
   ];
 }

@@ -64,15 +64,6 @@ const defaultGeneratorName = "movr"
 
 var defaultGenerator workload.Generator
 
-var demoNodeCacheSizeValue = newBytesOrPercentageValue(
-	&demoCtx.CacheSize,
-	memoryPercentResolver,
-)
-var demoNodeSQLMemSizeValue = newBytesOrPercentageValue(
-	&demoCtx.SQLPoolMemorySize,
-	memoryPercentResolver,
-)
-
 func init() {
 	for _, meta := range workload.Registered() {
 		gen := meta.New()
@@ -143,8 +134,6 @@ func checkDemoConfiguration(
 	if demoCtx.SimulateLatency && demoCtx.Localities != nil {
 		return nil, errors.Newf("--%s cannot be used with --%s", cliflags.Global.Name, cliflags.DemoNodeLocality.Name)
 	}
-
-	demoCtx.DisableTelemetry = cluster.TelemetryOptOut()
 
 	// Whether or not we enable enterprise feature is a combination of:
 	//
@@ -293,7 +282,7 @@ func runDemoInternal(
 
 		// Only print details about the telemetry configuration if the
 		// user has control over it.
-		if demoCtx.DisableTelemetry {
+		if cluster.TelemetryOptOut() {
 			cliCtx.PrintlnUnlessEmbedded("#\n# Telemetry disabled by configuration.")
 		} else {
 			cliCtx.PrintlnUnlessEmbedded("#\n" +
@@ -367,6 +356,13 @@ func runDemoInternal(
 
 	if err := extraInit(ctx, conn); err != nil {
 		return err
+	}
+
+	// Enable the latency as late in the process of starting the cluster as we
+	// can to minimize the startup time.
+	if demoCtx.SimulateLatency {
+		c.SetSimulatedLatency(true /* on */)
+		defer c.SetSimulatedLatency(false /* on */)
 	}
 
 	return sqlCtx.Run(ctx, conn)

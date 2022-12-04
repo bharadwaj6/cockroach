@@ -16,8 +16,7 @@ import (
 	"testing"
 
 	"github.com/cockroachdb/cockroach/pkg/build/bazel"
-	_ "github.com/cockroachdb/cockroach/pkg/ccl"
-	"github.com/cockroachdb/cockroach/pkg/ccl/utilccl"
+	"github.com/cockroachdb/cockroach/pkg/ccl"
 	"github.com/cockroachdb/cockroach/pkg/security/securityassets"
 	"github.com/cockroachdb/cockroach/pkg/security/securitytest"
 	"github.com/cockroachdb/cockroach/pkg/server"
@@ -67,7 +66,7 @@ func init() {
 }
 
 func TestMain(m *testing.M) {
-	defer utilccl.TestingEnableEnterprise()()
+	defer ccl.TestingEnableEnterprise()()
 	securityassets.SetLoader(securitytest.EmbeddedAssets)
 	randutil.SeedForTests()
 	serverutils.InitTestServerFactory(server.TestServerFactory)
@@ -1639,6 +1638,13 @@ func TestTenantLogic_shift(
 	runLogicTest(t, "shift")
 }
 
+func TestTenantLogic_show_commit_timestamp(
+	t *testing.T,
+) {
+	defer leaktest.AfterTest(t)()
+	runLogicTest(t, "show_commit_timestamp")
+}
+
 func TestTenantLogic_show_completions(
 	t *testing.T,
 ) {
@@ -1856,6 +1862,13 @@ func TestTenantLogic_temp_table_txn(
 	runLogicTest(t, "temp_table_txn")
 }
 
+func TestTenantLogic_tenant_from_tenant(
+	t *testing.T,
+) {
+	defer leaktest.AfterTest(t)()
+	runLogicTest(t, "tenant_from_tenant")
+}
+
 func TestTenantLogic_tenant_slow_repro(
 	t *testing.T,
 ) {
@@ -1903,6 +1916,13 @@ func TestTenantLogic_truncate(
 ) {
 	defer leaktest.AfterTest(t)()
 	runLogicTest(t, "truncate")
+}
+
+func TestTenantLogic_tsvector(
+	t *testing.T,
+) {
+	defer leaktest.AfterTest(t)()
+	runLogicTest(t, "tsvector")
 }
 
 func TestTenantLogic_tuple(

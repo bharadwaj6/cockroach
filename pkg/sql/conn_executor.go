@@ -1358,7 +1358,7 @@ type connExecutor struct {
 		txnFinishClosure struct {
 			// txnStartTime is the time that the transaction started.
 			txnStartTime time.Time
-			// implicit is whether or not the transaction was implicit.
+			// implicit is whether the transaction was implicit.
 			implicit bool
 		}
 
@@ -1398,6 +1398,11 @@ type connExecutor struct {
 		shouldCollectTxnExecutionStats bool
 		// accumulatedStats are the accumulated stats of all statements.
 		accumulatedStats execstats.QueryLevelStats
+
+		// idleLatency is the cumulative amount of time spent waiting for the
+		// client to send statements while holding the transaction open.
+		idleLatency time.Duration
+
 		// rowsRead and bytesRead are separate from QueryLevelStats because they are
 		// accumulated independently since they are always collected, as opposed to
 		// QueryLevelStats which are sampled.
@@ -1413,6 +1418,13 @@ type connExecutor struct {
 		// respectively.
 		rowsWrittenLogged bool
 		rowsReadLogged    bool
+
+		// shouldAcceptReleaseCockroachRestartInCommitWait is set to true if the
+		// transaction had SAVEPOINT cockroach_restart installed at the time that
+		// SHOW COMMIT TIMESTAMP was executed to commit the transaction. If so, the
+		// connExecutor will permit one invocation of RELEASE SAVEPOINT
+		// cockroach_restart while in the CommitWait state.
+		shouldAcceptReleaseCockroachRestartInCommitWait bool
 
 		// hasAdminRole is used to cache if the user running the transaction
 		// has admin privilege. hasAdminRoleCache is set for the first statement
@@ -1542,6 +1554,11 @@ type connExecutor struct {
 	// totalActiveTimeStopWatch tracks the total active time of the session.
 	// This is defined as the time spent executing transactions and statements.
 	totalActiveTimeStopWatch *timeutil.StopWatch
+
+	// previousTransactionCommitTimestamp is the timestamp of the previous
+	// transaction which committed. It is zero-valued when there is a transaction
+	// open or the previous transaction did not successfully commit.
+	previousTransactionCommitTimestamp hlc.Timestamp
 }
 
 // ctxHolder contains a connection's context and, while session tracing is
@@ -1928,7 +1945,9 @@ func (ex *connExecutor) execCmd() error {
 			// The behavior is configurable, in case users want to preserve the
 			// behavior from v21.2 and earlier.
 			implicitTxnForBatch := ex.sessionData().EnableImplicitTransactionForBatchStatements
-			canAutoCommit := ex.implicitTxn() && (tcmd.LastInBatch || !implicitTxnForBatch)
+			canAutoCommit := ex.implicitTxn() &&
+				(tcmd.LastInBatchBeforeShowCommitTimestamp ||
+					tcmd.LastInBatch || !implicitTxnForBatch)
 			ev, payload, err = ex.execStmt(
 				ctx, tcmd.Statement, nil /* prepared */, nil /* pinfo */, stmtRes, canAutoCommit,
 			)

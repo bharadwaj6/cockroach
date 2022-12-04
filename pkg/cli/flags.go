@@ -523,13 +523,13 @@ func init() {
 			}
 
 			// Engine flags.
-			cliflagcfg.VarFlag(f, cacheSizeValue, cliflags.Cache)
-			cliflagcfg.VarFlag(f, sqlSizeValue, cliflags.SQLMem)
-			cliflagcfg.VarFlag(f, tsdbSizeValue, cliflags.TSDBMem)
+			cliflagcfg.VarFlag(f, &startCtx.cacheSizeValue, cliflags.Cache)
+			cliflagcfg.VarFlag(f, &startCtx.sqlSizeValue, cliflags.SQLMem)
+			cliflagcfg.VarFlag(f, &startCtx.tsdbSizeValue, cliflags.TSDBMem)
 			// N.B. diskTempStorageSizeValue.ResolvePercentage() will be called after
 			// the stores flag has been parsed and the storage device that a percentage
 			// refers to becomes known.
-			cliflagcfg.VarFlag(f, diskTempStorageSizeValue, cliflags.SQLTempStorage)
+			cliflagcfg.VarFlag(f, &startCtx.diskTempStorageSizeValue, cliflags.SQLTempStorage)
 			cliflagcfg.StringFlag(f, &startCtx.tempDir, cliflags.TempDir)
 			cliflagcfg.StringFlag(f, &startCtx.externalIODir, cliflags.ExternalIODir)
 		}
@@ -537,6 +537,11 @@ func init() {
 		if backgroundFlagDefined {
 			cliflagcfg.BoolFlag(f, &startBackground, cliflags.Background)
 		}
+
+		// TODO(knz): Remove this port offset mechanism once we implement
+		// a shared listener. See: https://github.com/cockroachdb/cockroach/issues/84585
+		cliflagcfg.IntFlag(f, &baseCfg.SecondaryTenantPortOffset, cliflags.SecondaryTenantPortOffset)
+		_ = f.MarkHidden(cliflags.SecondaryTenantPortOffset.Name)
 	}
 
 	// Multi-tenancy start-sql command flags.
@@ -793,8 +798,8 @@ func init() {
 		cliflagcfg.IntFlag(f, &demoCtx.WorkloadMaxQPS, cliflags.DemoWorkloadMaxQPS)
 		cliflagcfg.VarFlag(f, &demoCtx.Localities, cliflags.DemoNodeLocality)
 		cliflagcfg.BoolFlag(f, &demoCtx.GeoPartitionedReplicas, cliflags.DemoGeoPartitionedReplicas)
-		cliflagcfg.VarFlag(f, demoNodeSQLMemSizeValue, cliflags.DemoNodeSQLMemSize)
-		cliflagcfg.VarFlag(f, demoNodeCacheSizeValue, cliflags.DemoNodeCacheSize)
+		cliflagcfg.VarFlag(f, &demoCtx.demoNodeSQLMemSizeValue, cliflags.DemoNodeSQLMemSize)
+		cliflagcfg.VarFlag(f, &demoCtx.demoNodeCacheSizeValue, cliflags.DemoNodeCacheSize)
 		cliflagcfg.BoolFlag(f, &demoCtx.Insecure, cliflags.ClientInsecure)
 		// NB: Insecure for `cockroach demo` is deprecated. See #53404.
 		_ = f.MarkDeprecated(cliflags.ServerInsecure.Name,
@@ -1138,6 +1143,9 @@ func extraServerFlagInit(cmd *cobra.Command) error {
 	}
 	serverCfg.LocalityAddresses = localityAdvertiseHosts
 
+	// Ensure that diagnostic reporting is enabled for server startup commands.
+	serverCfg.StartDiagnosticsReporting = true
+
 	return nil
 }
 
@@ -1192,6 +1200,18 @@ func mtStartSQLFlagsInit(cmd *cobra.Command) error {
 		// initialized when start is executed and temp dirs inherit path from first store.
 		tenantID := fs.Lookup(cliflags.TenantID.Name).Value.String()
 		serverCfg.Stores.Specs[0].Path += "-tenant-" + tenantID
+	}
+
+	// In standalone SQL servers, we do not generate a ballast file,
+	// unless a ballast size was specified explicitly by the user.
+	for i := range serverCfg.Stores.Specs {
+		spec := &serverCfg.Stores.Specs[i]
+		if spec.BallastSize == nil {
+			// Only override if there was no ballast size specified to start
+			// with.
+			zero := base.SizeSpec{InBytes: 0, Percent: 0}
+			spec.BallastSize = &zero
+		}
 	}
 	return nil
 }

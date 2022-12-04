@@ -191,6 +191,9 @@ type instrumentationHelper struct {
 
 	// scanCounts records the number of times scans were used in the query.
 	scanCounts [exec.NumScanCountTypes]int
+
+	// indexesUsed list the indexes used in the query with format tableID@indexID.
+	indexesUsed []string
 }
 
 // outputMode indicates how the statement output needs to be populated (for
@@ -747,9 +750,9 @@ func (ih *instrumentationHelper) SetIndexRecommendations(
 	) {
 		f := opc.optimizer.Factory()
 		evalCtx := opc.p.EvalContext()
-		f.Init(ctx, evalCtx, &opc.catalog)
+		f.Init(ctx, evalCtx, opc.catalog)
 		f.FoldingControl().AllowStableFolds()
-		bld := optbuilder.New(ctx, &opc.p.semaCtx, evalCtx, &opc.catalog, f, opc.p.stmt.AST)
+		bld := optbuilder.New(ctx, &opc.p.semaCtx, evalCtx, opc.catalog, f, opc.p.stmt.AST)
 		err := bld.Build()
 		if err != nil {
 			log.Warningf(ctx, "unable to build memo: %s", err)

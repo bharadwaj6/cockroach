@@ -180,7 +180,6 @@ var _ CCLOnlyStatement = &AlterChangefeed{}
 var _ CCLOnlyStatement = &Import{}
 var _ CCLOnlyStatement = &Export{}
 var _ CCLOnlyStatement = &ScheduledBackup{}
-var _ CCLOnlyStatement = &StreamIngestion{}
 var _ CCLOnlyStatement = &CreateTenantFromReplication{}
 
 // StatementReturnType implements the Statement interface.
@@ -1880,6 +1879,17 @@ func (*ShowCreateExternalConnections) StatementTag() string {
 }
 
 // StatementReturnType implements the Statement interface.
+func (*ShowCommitTimestamp) StatementReturnType() StatementReturnType { return Rows }
+
+// StatementType implements the Statement interface.
+func (*ShowCommitTimestamp) StatementType() StatementType { return TypeTCL }
+
+// StatementTag returns a short string identifying the type of statement.
+func (*ShowCommitTimestamp) StatementTag() string {
+	return "SHOW COMMIT TIMESTAMP"
+}
+
+// StatementReturnType implements the Statement interface.
 func (*Split) StatementReturnType() StatementReturnType { return Rows }
 
 // StatementType implements the Statement interface.
@@ -1887,17 +1897,6 @@ func (*Split) StatementType() StatementType { return TypeDML }
 
 // StatementTag returns a short string identifying the type of statement.
 func (*Split) StatementTag() string { return "SPLIT" }
-
-// StatementReturnType implements the Statement interface.
-func (*StreamIngestion) StatementReturnType() StatementReturnType { return Rows }
-
-// StatementType implements the Statement interface.
-func (*StreamIngestion) StatementType() StatementType { return TypeDML }
-
-// StatementTag returns a short string identifying the type of statement.
-func (*StreamIngestion) StatementTag() string { return "RESTORE FROM REPLICATION STREAM" }
-
-func (*StreamIngestion) cclOnlyStatement() {}
 
 // StatementReturnType implements the Statement interface.
 func (*Unsplit) StatementReturnType() StatementReturnType { return Rows }
@@ -2217,8 +2216,8 @@ func (n *ShowZoneConfig) String() string                      { return AsString(
 func (n *ShowFingerprints) String() string                    { return AsString(n) }
 func (n *ShowDefaultPrivileges) String() string               { return AsString(n) }
 func (n *ShowCompletions) String() string                     { return AsString(n) }
+func (n *ShowCommitTimestamp) String() string                 { return AsString(n) }
 func (n *Split) String() string                               { return AsString(n) }
-func (n *StreamIngestion) String() string                     { return AsString(n) }
 func (n *Unsplit) String() string                             { return AsString(n) }
 func (n *Truncate) String() string                            { return AsString(n) }
 func (n *UnionClause) String() string                         { return AsString(n) }

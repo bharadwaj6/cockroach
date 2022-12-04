@@ -804,14 +804,14 @@ func (u *sqlSymUnion) functionOptions() tree.FunctionOptions {
 func (u *sqlSymUnion) functionOption() tree.FunctionOption {
     return u.val.(tree.FunctionOption)
 }
-func (u *sqlSymUnion) functionArgs() tree.FuncArgs {
-    return u.val.(tree.FuncArgs)
+func (u *sqlSymUnion) functionParams() tree.FuncParams {
+    return u.val.(tree.FuncParams)
 }
-func (u *sqlSymUnion) functionArg() tree.FuncArg {
-    return u.val.(tree.FuncArg)
+func (u *sqlSymUnion) functionParam() tree.FuncParam {
+    return u.val.(tree.FuncParam)
 }
-func (u *sqlSymUnion) functionArgClass() tree.FuncArgClass {
-    return u.val.(tree.FuncArgClass)
+func (u *sqlSymUnion) functionParamClass() tree.FuncParamClass {
+    return u.val.(tree.FuncParamClass)
 }
 func (u *sqlSymUnion) stmts() tree.Statements {
     return u.val.(tree.Statements)
@@ -845,7 +845,7 @@ func (u *sqlSymUnion) functionObjs() tree.FuncObjs {
 
 // Ordinary key words in alphabetical order.
 %token <str> ABORT ABSOLUTE ACCESS ACTION ADD ADMIN AFTER AGGREGATE
-%token <str> ALL ALTER ALWAYS ANALYSE ANALYZE AND AND_AND ANY ANNOTATE_TYPE ARRAY AS ASC
+%token <str> ALL ALTER ALWAYS ANALYSE ANALYZE AND AND_AND ANY ANNOTATE_TYPE ARRAY AS ASC AT_AT
 %token <str> ASENSITIVE ASYMMETRIC AT ATOMIC ATTRIBUTE AUTHORIZATION AUTOMATIC AVAILABILITY
 
 %token <str> BACKUP BACKUPS BACKWARD BEFORE BEGIN BETWEEN BIGINT BIGSERIAL BINARY BIT
@@ -1185,6 +1185,7 @@ func (u *sqlSymUnion) functionObjs() tree.FuncObjs {
 %type <tree.Statement> show_stmt
 %type <tree.Statement> show_backup_stmt
 %type <tree.Statement> show_columns_stmt
+%type <tree.Statement> show_commit_timestamp_stmt
 %type <tree.Statement> show_constraints_stmt
 %type <tree.Statement> show_create_stmt
 %type <tree.Statement> show_create_schedules_stmt
@@ -1576,18 +1577,18 @@ func (u *sqlSymUnion) functionObjs() tree.FuncObjs {
 // User defined function relevant components.
 %type <bool> opt_or_replace opt_return_set opt_no
 %type <str> param_name func_as
-%type <tree.FuncArgs> opt_func_arg_with_default_list func_arg_with_default_list func_args func_args_list
-%type <tree.FuncArg> func_arg_with_default func_arg
-%type <tree.ResolvableTypeReference> func_return_type func_arg_type
+%type <tree.FuncParams> opt_func_param_with_default_list func_param_with_default_list func_params func_params_list
+%type <tree.FuncParam> func_param_with_default func_param
+%type <tree.ResolvableTypeReference> func_return_type func_param_type
 %type <tree.FunctionOptions> opt_create_func_opt_list create_func_opt_list alter_func_opt_list
 %type <tree.FunctionOption> create_func_opt_item common_func_opt_item
-%type <tree.FuncArgClass> func_arg_class
+%type <tree.FuncParamClass> func_param_class
 %type <*tree.UnresolvedObjectName> func_create_name
 %type <tree.Statement> routine_return_stmt routine_body_stmt
 %type <tree.Statements> routine_body_stmt_list
 %type <*tree.RoutineBody> opt_routine_body
-%type <tree.FuncObj> function_with_argtypes
-%type <tree.FuncObjs> function_with_argtypes_list
+%type <tree.FuncObj> function_with_paramtypes
+%type <tree.FuncObjs> function_with_paramtypes_list
 
 %type <*tree.LabelSpec> label_spec
 
@@ -1632,7 +1633,7 @@ func (u *sqlSymUnion) functionObjs() tree.FuncObjs {
 // funny behavior of UNBOUNDED on the SQL standard, though.
 %nonassoc  UNBOUNDED         // ideally should have same precedence as IDENT
 %nonassoc  IDENT NULL PARTITION RANGE ROWS GROUPS PRECEDING FOLLOWING CUBE ROLLUP
-%left      CONCAT FETCHVAL FETCHTEXT FETCHVAL_PATH FETCHTEXT_PATH REMOVE_PATH  // multi-character ops
+%left      CONCAT FETCHVAL FETCHTEXT FETCHVAL_PATH FETCHTEXT_PATH REMOVE_PATH AT_AT  // multi-character ops
 %left      '|'
 %left      '#'
 %left      '&'
@@ -1678,29 +1679,30 @@ stmt:
   }
 
 stmt_without_legacy_transaction:
-  preparable_stmt           // help texts in sub-rule
-| analyze_stmt              // EXTEND WITH HELP: ANALYZE
+  preparable_stmt            // help texts in sub-rule
+| analyze_stmt               // EXTEND WITH HELP: ANALYZE
 | copy_from_stmt
 | comment_stmt
-| execute_stmt              // EXTEND WITH HELP: EXECUTE
-| deallocate_stmt           // EXTEND WITH HELP: DEALLOCATE
-| discard_stmt              // EXTEND WITH HELP: DISCARD
-| grant_stmt                // EXTEND WITH HELP: GRANT
-| prepare_stmt              // EXTEND WITH HELP: PREPARE
-| revoke_stmt               // EXTEND WITH HELP: REVOKE
-| savepoint_stmt            // EXTEND WITH HELP: SAVEPOINT
-| reassign_owned_by_stmt    // EXTEND WITH HELP: REASSIGN OWNED BY
-| drop_owned_by_stmt        // EXTEND WITH HELP: DROP OWNED BY
-| release_stmt              // EXTEND WITH HELP: RELEASE
-| refresh_stmt              // EXTEND WITH HELP: REFRESH
-| nonpreparable_set_stmt    // help texts in sub-rule
-| transaction_stmt          // help texts in sub-rule
-| close_cursor_stmt         // EXTEND WITH HELP: CLOSE
-| declare_cursor_stmt       // EXTEND WITH HELP: DECLARE
-| fetch_cursor_stmt         // EXTEND WITH HELP: FETCH
-| move_cursor_stmt          // EXTEND WITH HELP: MOVE
+| execute_stmt               // EXTEND WITH HELP: EXECUTE
+| deallocate_stmt            // EXTEND WITH HELP: DEALLOCATE
+| discard_stmt               // EXTEND WITH HELP: DISCARD
+| grant_stmt                 // EXTEND WITH HELP: GRANT
+| prepare_stmt               // EXTEND WITH HELP: PREPARE
+| revoke_stmt                // EXTEND WITH HELP: REVOKE
+| savepoint_stmt             // EXTEND WITH HELP: SAVEPOINT
+| reassign_owned_by_stmt     // EXTEND WITH HELP: REASSIGN OWNED BY
+| drop_owned_by_stmt         // EXTEND WITH HELP: DROP OWNED BY
+| release_stmt               // EXTEND WITH HELP: RELEASE
+| refresh_stmt               // EXTEND WITH HELP: REFRESH
+| nonpreparable_set_stmt     // help texts in sub-rule
+| transaction_stmt           // help texts in sub-rule
+| close_cursor_stmt          // EXTEND WITH HELP: CLOSE
+| declare_cursor_stmt        // EXTEND WITH HELP: DECLARE
+| fetch_cursor_stmt          // EXTEND WITH HELP: FETCH
+| move_cursor_stmt           // EXTEND WITH HELP: MOVE
 | reindex_stmt
 | unlisten_stmt
+| show_commit_timestamp_stmt // EXTEND WITH HELP: SHOW COMMIT TIMESTAMP
 
 // %Help: ALTER
 // %Category: Group
@@ -3556,14 +3558,6 @@ restore_stmt:
       Options: *($9.restoreOptions()),
     }
   }
-| RESTORE backup_targets FROM REPLICATION STREAM FROM string_or_placeholder_opt_list opt_as_tenant_clause
-  {
-   $$.val = &tree.StreamIngestion{
-     Targets: $2.backupTargetList(),
-     From: $7.stringOrPlaceholderOptList(),
-     AsTenant: $8.asTenantClause(),
-   }
-  }
 | RESTORE error // SHOW HELP: RESTORE
 
 string_or_placeholder_opt_list:
@@ -4208,7 +4202,7 @@ create_extension_stmt:
 //  } ...
 // %SeeAlso: WEBDOCS/create-function.html
 create_func_stmt:
-  CREATE opt_or_replace FUNCTION func_create_name '(' opt_func_arg_with_default_list ')' RETURNS opt_return_set func_return_type
+  CREATE opt_or_replace FUNCTION func_create_name '(' opt_func_param_with_default_list ')' RETURNS opt_return_set func_return_type
   opt_create_func_opt_list opt_routine_body
   {
     name := $4.unresolvedObjectName().ToFunctionName()
@@ -4216,7 +4210,7 @@ create_func_stmt:
       IsProcedure: false,
       Replace: $2.bool(),
       FuncName: name,
-      Args: $6.functionArgs(),
+      Params: $6.functionParams(),
       ReturnType: tree.FuncReturnType{
         Type: $10.typeReference(),
         IsSet: $9.bool(),
@@ -4238,84 +4232,84 @@ opt_return_set:
 func_create_name:
   db_object_name
 
-opt_func_arg_with_default_list:
-  func_arg_with_default_list { $$.val = $1.functionArgs() }
-| /* Empty */ { $$.val = tree.FuncArgs{} }
+opt_func_param_with_default_list:
+  func_param_with_default_list { $$.val = $1.functionParams() }
+| /* Empty */ { $$.val = tree.FuncParams{} }
 
-func_arg_with_default_list:
-  func_arg_with_default { $$.val = tree.FuncArgs{$1.functionArg()} }
-| func_arg_with_default_list ',' func_arg_with_default
+func_param_with_default_list:
+  func_param_with_default { $$.val = tree.FuncParams{$1.functionParam()} }
+| func_param_with_default_list ',' func_param_with_default
   {
-    $$.val = append($1.functionArgs(), $3.functionArg())
+    $$.val = append($1.functionParams(), $3.functionParam())
   }
 
-func_arg_with_default:
-  func_arg
-| func_arg DEFAULT a_expr
+func_param_with_default:
+  func_param
+| func_param DEFAULT a_expr
   {
-    arg := $1.functionArg()
+    arg := $1.functionParam()
     arg.DefaultVal = $3.expr()
     $$.val = arg
   }
-| func_arg '=' a_expr
+| func_param '=' a_expr
   {
-    arg := $1.functionArg()
+    arg := $1.functionParam()
     arg.DefaultVal = $3.expr()
     $$.val = arg
   }
 
-func_arg:
-  func_arg_class param_name func_arg_type
+func_param:
+  func_param_class param_name func_param_type
   {
-    $$.val = tree.FuncArg{
+    $$.val = tree.FuncParam{
       Name: tree.Name($2),
       Type: $3.typeReference(),
-      Class: $1.functionArgClass(),
+      Class: $1.functionParamClass(),
     }
   }
-| param_name func_arg_class func_arg_type
+| param_name func_param_class func_param_type
   {
-    $$.val = tree.FuncArg{
+    $$.val = tree.FuncParam{
       Name: tree.Name($1),
       Type: $3.typeReference(),
-      Class: $2.functionArgClass(),
+      Class: $2.functionParamClass(),
     }
   }
-| param_name func_arg_type
+| param_name func_param_type
   {
-    $$.val = tree.FuncArg{
+    $$.val = tree.FuncParam{
       Name: tree.Name($1),
       Type: $2.typeReference(),
-      Class: tree.FunctionArgIn,
+      Class: tree.FunctionParamIn,
     }
   }
-| func_arg_class func_arg_type
+| func_param_class func_param_type
   {
-    $$.val = tree.FuncArg{
+    $$.val = tree.FuncParam{
       Type: $2.typeReference(),
-      Class: $1.functionArgClass(),
+      Class: $1.functionParamClass(),
     }
   }
-| func_arg_type
+| func_param_type
   {
-    $$.val = tree.FuncArg{
+    $$.val = tree.FuncParam{
       Type: $1.typeReference(),
-      Class: tree.FunctionArgIn,
+      Class: tree.FunctionParamIn,
     }
   }
 
-func_arg_class:
-  IN { $$.val = tree.FunctionArgIn }
+func_param_class:
+  IN { $$.val = tree.FunctionParamIn }
 | OUT { return unimplemented(sqllex, "create function with 'OUT' argument class") }
 | INOUT { return unimplemented(sqllex, "create function with 'INOUT' argument class") }
 | IN OUT { return unimplemented(sqllex, "create function with 'IN OUT' argument class") }
 | VARIADIC { return unimplementedWithIssueDetail(sqllex, 88947, "variadic user-defined functions") }
 
-func_arg_type:
+func_param_type:
   typename
 
 func_return_type:
-  func_arg_type
+  func_param_type
 
 opt_create_func_opt_list:
   create_func_opt_list { $$.val = $1.functionOptions() }
@@ -4466,14 +4460,14 @@ opt_routine_body:
 //    [ CASCADE | RESTRICT ]
 // %SeeAlso: WEBDOCS/drop-function.html
 drop_func_stmt:
-  DROP FUNCTION function_with_argtypes_list opt_drop_behavior
+  DROP FUNCTION function_with_paramtypes_list opt_drop_behavior
   {
     $$.val = &tree.DropFunction{
       Functions: $3.functionObjs(),
       DropBehavior: $4.dropBehavior(),
     }
   }
-| DROP FUNCTION IF EXISTS function_with_argtypes_list opt_drop_behavior
+| DROP FUNCTION IF EXISTS function_with_paramtypes_list opt_drop_behavior
   {
     $$.val = &tree.DropFunction{
       IfExists: true,
@@ -4483,22 +4477,22 @@ drop_func_stmt:
   }
 | DROP FUNCTION error // SHOW HELP: DROP FUNCTION
 
-function_with_argtypes_list:
-  function_with_argtypes
+function_with_paramtypes_list:
+  function_with_paramtypes
   {
     $$.val = tree.FuncObjs{$1.functionObj()}
   }
-  | function_with_argtypes_list ',' function_with_argtypes
+  | function_with_paramtypes_list ',' function_with_paramtypes
   {
     $$.val = append($1.functionObjs(), $3.functionObj())
   }
 
-function_with_argtypes:
-  db_object_name func_args
+function_with_paramtypes:
+  db_object_name func_params
   {
     $$.val = tree.FuncObj{
       FuncName: $1.unresolvedObjectName().ToFunctionName(),
-      Args: $2.functionArgs(),
+      Params: $2.functionParams(),
     }
   }
   | db_object_name
@@ -4508,28 +4502,28 @@ function_with_argtypes:
     }
   }
 
-func_args:
-  '(' func_args_list ')'
+func_params:
+  '(' func_params_list ')'
   {
-    $$.val = $2.functionArgs()
+    $$.val = $2.functionParams()
   }
   | '(' ')'
   {
-    $$.val = tree.FuncArgs{}
+    $$.val = tree.FuncParams{}
   }
 
-func_args_list:
-  func_arg
+func_params_list:
+  func_param
   {
-    $$.val = tree.FuncArgs{$1.functionArg()}
+    $$.val = tree.FuncParams{$1.functionParam()}
   }
-  | func_args_list ',' func_arg
+  | func_params_list ',' func_param
   {
-    $$.val = append($1.functionArgs(), $3.functionArg())
+    $$.val = append($1.functionParams(), $3.functionParam())
   }
 
 alter_func_options_stmt:
-  ALTER FUNCTION function_with_argtypes alter_func_opt_list opt_restrict
+  ALTER FUNCTION function_with_paramtypes alter_func_opt_list opt_restrict
   {
     $$.val = &tree.AlterFunctionOptions{
       Function: $3.functionObj(),
@@ -4552,7 +4546,7 @@ opt_restrict:
 | /* EMPTY */ {}
 
 alter_func_rename_stmt:
-  ALTER FUNCTION function_with_argtypes RENAME TO name
+  ALTER FUNCTION function_with_paramtypes RENAME TO name
   {
     $$.val = &tree.AlterFunctionRename{
       Function: $3.functionObj(),
@@ -4561,7 +4555,7 @@ alter_func_rename_stmt:
   }
 
 alter_func_set_schema_stmt:
-  ALTER FUNCTION function_with_argtypes SET SCHEMA schema_name
+  ALTER FUNCTION function_with_paramtypes SET SCHEMA schema_name
   {
     $$.val = &tree.AlterFunctionSetSchema{
       Function: $3.functionObj(),
@@ -4570,7 +4564,7 @@ alter_func_set_schema_stmt:
   }
 
 alter_func_owner_stmt:
-  ALTER FUNCTION function_with_argtypes OWNER TO role_spec
+  ALTER FUNCTION function_with_paramtypes OWNER TO role_spec
   {
     $$.val = &tree.AlterFunctionSetOwner{
       Function: $3.functionObj(),
@@ -4579,7 +4573,7 @@ alter_func_owner_stmt:
   }
 
 alter_func_dep_extension_stmt:
-  ALTER FUNCTION function_with_argtypes opt_no DEPENDS ON EXTENSION name
+  ALTER FUNCTION function_with_paramtypes opt_no DEPENDS ON EXTENSION name
   {
     $$.val = &tree.AlterFunctionDepExtension{
       Function: $3.functionObj(),
@@ -6305,8 +6299,8 @@ zone_value:
 // SHOW ROLES, SHOW SCHEMAS, SHOW SEQUENCES, SHOW SESSION, SHOW SESSIONS,
 // SHOW STATISTICS, SHOW SYNTAX, SHOW TABLES, SHOW TRACE, SHOW TRANSACTION,
 // SHOW TRANSACTIONS, SHOW TRANSFER, SHOW TYPES, SHOW USERS, SHOW LAST QUERY STATISTICS,
-// SHOW SCHEDULES, SHOW LOCALITY, SHOW ZONE CONFIGURATION, SHOW FULL TABLE SCANS,
-// SHOW CREATE EXTERNAL CONNECTIONS, SHOW TENANT
+// SHOW SCHEDULES, SHOW LOCALITY, SHOW ZONE CONFIGURATION, SHOW COMMIT TIMESTAMP,
+// SHOW FULL TABLE SCANS, SHOW CREATE EXTERNAL CONNECTIONS, SHOW TENANT
 show_stmt:
   show_backup_stmt           // EXTEND WITH HELP: SHOW BACKUP
 | show_columns_stmt          // EXTEND WITH HELP: SHOW COLUMNS
@@ -7006,6 +7000,22 @@ show_indexes_stmt:
     $$.val = &tree.ShowDatabaseIndexes{Database: tree.Name($5), WithComment: $6.bool()}
   }
 | SHOW KEYS error // SHOW HELP: SHOW INDEXES
+
+// %Help: SHOW COMMIT TIMESTAMP - show timestamp commit timestamp of last transaction
+// %Category: Misc
+// %Text: SHOW COMMIT TIMESTAMP
+//
+// Shows the commit timestamp of the last committed transaction if not currently
+// in a transaction. If currently in a transaction, implicitly commits the
+// transaction, returning any errors which may have occurred during the commit.
+// The transaction state will remain open from the perspective of the client,
+// meaning that a COMMIT must be issued to move the connection back to a state
+// where new statements may be issued.
+show_commit_timestamp_stmt:
+  SHOW COMMIT TIMESTAMP
+  {
+    $$.val = &tree.ShowCommitTimestamp{}
+  }
 
 // %Help: SHOW CONSTRAINTS - list constraints
 // %Category: DDL
@@ -7926,7 +7936,7 @@ grant_targets:
   {
     $$.val = tree.GrantTargetList{ExternalConnections: $3.nameList()}
   }
-| FUNCTION function_with_argtypes_list
+| FUNCTION function_with_paramtypes_list
   {
     $$.val = tree.GrantTargetList{Functions: $2.functionObjs()}
   }
@@ -13187,6 +13197,10 @@ a_expr:
   {
     $$.val = &tree.ComparisonExpr{Operator: treecmp.MakeComparisonOperator(treecmp.Overlaps), Left: $1.expr(), Right: $3.expr()}
   }
+| a_expr AT_AT a_expr
+  {
+    $$.val = &tree.ComparisonExpr{Operator: treecmp.MakeComparisonOperator(treecmp.TSMatches), Left: $1.expr(), Right: $3.expr()}
+  }
 | a_expr INET_CONTAINS_OR_EQUALS a_expr
   {
     $$.val = &tree.FuncExpr{Func: tree.WrapFunction("inet_contains_or_equals"), Exprs: tree.Exprs{$1.expr(), $3.expr()}}
@@ -14378,6 +14392,7 @@ all_op:
 | REGIMATCH { $$.val = treecmp.MakeComparisonOperator(treecmp.RegIMatch) }
 | NOT_REGIMATCH { $$.val = treecmp.MakeComparisonOperator(treecmp.NotRegIMatch) }
 | AND_AND { $$.val = treecmp.MakeComparisonOperator(treecmp.Overlaps) }
+| AT_AT { $$.val = treecmp.MakeComparisonOperator(treecmp.TSMatches) }
 | '~' { $$.val = tree.MakeUnaryOperator(tree.UnaryComplement) }
 | SQRT { $$.val = tree.MakeUnaryOperator(tree.UnarySqrt) }
 | CBRT { $$.val = tree.MakeUnaryOperator(tree.UnaryCbrt) }

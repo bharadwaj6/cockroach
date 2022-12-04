@@ -91,10 +91,16 @@ func newPlanNodeToRowSource(
 
 // MustBeStreaming implements the execinfra.Processor interface.
 func (p *planNodeToRowSource) MustBeStreaming() bool {
-	// hookFnNode is special because it might be blocked forever if we decide to
-	// buffer its output.
-	_, isHookFnNode := p.node.(*hookFnNode)
-	return isHookFnNode
+	switch p.node.(type) {
+	case *hookFnNode, *cdcValuesNode:
+		// hookFnNode is special because it might be blocked forever if we decide to
+		// buffer its output.
+		// cdcValuesNode is a node used by CDC that must stream data row-by-row, and
+		// it may also block forever if the input is buffered.
+		return true
+	default:
+		return false
+	}
 }
 
 // InitWithOutput implements the LocalProcessor interface.
@@ -256,7 +262,7 @@ func (p *planNodeToRowSource) execStatsForTrace() *execinfrapb.ComponentStats {
 	// Propagate RUs from IO requests.
 	// TODO(drewk): we should consider propagating other stats for planNode
 	// operators.
-	scanStats := execstats.GetScanStats(p.Ctx, p.ExecStatsTrace)
+	scanStats := execstats.GetScanStats(p.Ctx(), p.ExecStatsTrace)
 	if scanStats.ConsumedRU == 0 {
 		return nil
 	}

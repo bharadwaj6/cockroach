@@ -1619,6 +1619,13 @@ func TestLogic_shift(
 	runLogicTest(t, "shift")
 }
 
+func TestLogic_show_commit_timestamp(
+	t *testing.T,
+) {
+	defer leaktest.AfterTest(t)()
+	runLogicTest(t, "show_commit_timestamp")
+}
+
 func TestLogic_show_completions(
 	t *testing.T,
 ) {
@@ -1897,6 +1904,13 @@ func TestLogic_truncate(
 ) {
 	defer leaktest.AfterTest(t)()
 	runLogicTest(t, "truncate")
+}
+
+func TestLogic_tsvector(
+	t *testing.T,
+) {
+	defer leaktest.AfterTest(t)()
+	runLogicTest(t, "tsvector")
 }
 
 func TestLogic_tuple(

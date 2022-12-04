@@ -18,6 +18,7 @@ import (
 
 	"github.com/cockroachdb/cockroach/pkg/config"
 	"github.com/cockroachdb/cockroach/pkg/gossip"
+	"github.com/cockroachdb/cockroach/pkg/kv/kvclient/kvcoord"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvclient/kvtenant"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/rpc"
@@ -121,6 +122,18 @@ func (m *mockServer) GetAllSystemSpanConfigsThatApply(
 func (m *mockServer) UpdateSpanConfigs(
 	context.Context, *roachpb.UpdateSpanConfigsRequest,
 ) (*roachpb.UpdateSpanConfigsResponse, error) {
+	panic("unimplemented")
+}
+
+func (m *mockServer) SpanConfigConformance(
+	context.Context, *roachpb.SpanConfigConformanceRequest,
+) (*roachpb.SpanConfigConformanceResponse, error) {
+	panic("unimplemented")
+}
+
+func (m *mockServer) GetRangeDescriptors(
+	*roachpb.GetRangeDescriptorsRequest, roachpb.Internal_GetRangeDescriptorsServer,
+) error {
 	panic("unimplemented")
 }
 
@@ -313,7 +326,7 @@ func TestConnectorRangeLookup(t *testing.T) {
 		// Validate request.
 		assert.Equal(t, roachpb.RKey("a"), req.Key)
 		assert.Equal(t, roachpb.READ_UNCOMMITTED, req.ReadConsistency)
-		assert.Equal(t, int64(0), req.PrefetchNum)
+		assert.Equal(t, int64(kvcoord.RangeLookupPrefetchCount), req.PrefetchNum)
 		assert.Equal(t, false, req.PrefetchReverse)
 
 		// Respond.

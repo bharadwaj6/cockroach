@@ -170,12 +170,16 @@ export const DurationFitScale =
   };
 
 export const DATE_FORMAT = "MMM DD, YYYY [at] H:mm";
+export const DATE_WITH_SECONDS_AND_MILLISECONDS_FORMAT =
+  "MMM DD, YYYY [at] H:mm:ss:ms";
 
 /**
- * Alternate 24 hour UTC format
+ * Alternate 24 hour UTC formats
  */
 export const DATE_FORMAT_24_UTC = "MMM DD, YYYY [at] H:mm UTC";
 export const DATE_WITH_SECONDS_FORMAT_24_UTC = "MMM DD, YYYY [at] H:mm:ss UTC";
+export const DATE_WITH_SECONDS_AND_MILLISECONDS_FORMAT_24_UTC =
+  "MMM DD, YYYY [at] H:mm:ss:ms UTC";
 
 export function RenderCount(yesCount: Long, totalCount: Long): string {
   if (longToInt(yesCount) == 0) {
@@ -225,7 +229,17 @@ export const limitStringArray = (arr: string[], limit: number): string => {
     return limitText(arr[0], limit);
   }
 
-  return arr[0].concat("...");
+  let str = arr[0];
+  for (let next = 1; next < arr.length; ++next) {
+    const charsLeft = limit - str.length;
+    if (charsLeft < arr[next].length) {
+      str += arr[next].substring(0, charsLeft).concat("...");
+      break;
+    }
+    str += arr[next];
+  }
+
+  return str;
 };
 
 function add(a: string, b: string): string {

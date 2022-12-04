@@ -79,6 +79,11 @@ func ingestionPlanHook(
 		)
 	}
 
+	if !p.ExecCfg().Codec.ForSystemTenant() {
+		return nil, nil, nil, false, pgerror.Newf(pgcode.InsufficientPrivilege,
+			"only the system tenant can create other tenants")
+	}
+
 	exprEval := p.ExprEvaluator("INGESTION")
 
 	from, err := exprEval.String(ctx, ingestionStmt.ReplicationSourceAddress)
@@ -127,12 +132,15 @@ func ingestionPlanHook(
 		if _, err := sql.GetTenantRecordByName(ctx, p.ExecCfg(), p.Txn(), roachpb.TenantName(destinationTenant)); err == nil {
 			return errors.Newf("tenant with name %q already exists", destinationTenant)
 		}
+
+		jobID := p.ExecCfg().JobRegistry.MakeJobID()
 		tenantInfo := &descpb.TenantInfoWithUsage{
 			TenantInfo: descpb.TenantInfo{
 				// We leave the ID field unset so that the tenant is assigned the next
 				// available tenant ID.
-				State: descpb.TenantInfo_ADD,
-				Name:  roachpb.TenantName(destinationTenant),
+				State:                  descpb.TenantInfo_ADD,
+				Name:                   roachpb.TenantName(destinationTenant),
+				TenantReplicationJobID: jobID,
 			},
 		}
 
@@ -161,6 +169,11 @@ func ingestionPlanHook(
 		}
 
 		prefix := keys.MakeTenantPrefix(destinationTenantID)
+		// TODO(adityamaru): Wire this up to the user configurable option.
+		replicationTTLSeconds := 25 * 60 * 60
+		if knobs := p.ExecCfg().StreamingTestingKnobs; knobs != nil && knobs.OverrideReplicationTTLSeconds != 0 {
+			replicationTTLSeconds = knobs.OverrideReplicationTTLSeconds
+		}
 		streamIngestionDetails := jobspb.StreamIngestionDetails{
 			StreamAddress:         string(streamAddress),
 			StreamID:              uint64(streamID),
@@ -168,6 +181,7 @@ func ingestionPlanHook(
 			DestinationTenantID:   destinationTenantID,
 			SourceTenantName:      roachpb.TenantName(sourceTenant),
 			DestinationTenantName: roachpb.TenantName(destinationTenant),
+			ReplicationTTLSeconds: int32(replicationTTLSeconds),
 		}
 
 		jobDescription, err := streamIngestionJobDescription(p, ingestionStmt)
@@ -182,12 +196,12 @@ func ingestionPlanHook(
 			Details:     streamIngestionDetails,
 		}
 
-		jobID := p.ExecCfg().JobRegistry.MakeJobID()
 		sj, err := p.ExecCfg().JobRegistry.CreateAdoptableJobWithTxn(ctx, jr,
 			jobID, p.Txn())
 		if err != nil {
 			return err
 		}
+
 		resultsCh <- tree.Datums{tree.NewDInt(tree.DInt(sj.ID())), tree.NewDInt(tree.DInt(streamID))}
 		return nil
 	}

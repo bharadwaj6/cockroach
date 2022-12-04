@@ -96,6 +96,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
 	"github.com/cockroachdb/cockroach/pkg/testutils/serverutils"
 	"github.com/cockroachdb/cockroach/pkg/upgrade"
+	"github.com/cockroachdb/cockroach/pkg/upgrade/upgradebase"
 	"github.com/cockroachdb/cockroach/pkg/util/bitarray"
 	"github.com/cockroachdb/cockroach/pkg/util/duration"
 	"github.com/cockroachdb/cockroach/pkg/util/errorutil/unimplemented"
@@ -103,6 +104,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/metric"
 	"github.com/cockroachdb/cockroach/pkg/util/mon"
+	"github.com/cockroachdb/cockroach/pkg/util/rangedesc"
 	"github.com/cockroachdb/cockroach/pkg/util/syncutil"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil/pgdate"
 	"github.com/cockroachdb/cockroach/pkg/util/tracing"
@@ -201,11 +203,11 @@ var allowCrossDatabaseSeqReferences = settings.RegisterBoolSetting(
 // tenant.
 const SecondaryTenantsZoneConfigsEnabledSettingName = "sql.zone_configs.allow_for_secondary_tenant.enabled"
 
-// secondaryTenantZoneConfigsEnabled controls if secondary tenants are allowed
+// SecondaryTenantZoneConfigsEnabled controls if secondary tenants are allowed
 // to set zone configurations. It has no effect for the system tenant.
 //
 // This setting has no effect on zone configurations that have already been set.
-var secondaryTenantZoneConfigsEnabled = settings.RegisterBoolSetting(
+var SecondaryTenantZoneConfigsEnabled = settings.RegisterBoolSetting(
 	settings.TenantReadOnly,
 	SecondaryTenantsZoneConfigsEnabledSettingName,
 	"allow secondary tenants to set zone configurations; does not affect the system tenant",
@@ -1176,7 +1178,6 @@ type ExecutorConfig struct {
 	// available when not running as a system tenant.
 	SQLStatusServer    serverpb.SQLStatusServer
 	TenantStatusServer serverpb.TenantStatusServer
-	RegionsServer      serverpb.RegionsServer
 	MetricsRecorder    nodeStatusGenerator
 	SessionRegistry    *SessionRegistry
 	ClosedSessionCache *ClosedSessionCache
@@ -1195,7 +1196,7 @@ type ExecutorConfig struct {
 	InternalRowMetrics   *rowinfra.Metrics
 
 	TestingKnobs                         ExecutorTestingKnobs
-	UpgradeTestingKnobs                  *upgrade.TestingKnobs
+	UpgradeTestingKnobs                  *upgradebase.TestingKnobs
 	PGWireTestingKnobs                   *PGWireTestingKnobs
 	SchemaChangerTestingKnobs            *SchemaChangerTestingKnobs
 	DeclarativeSchemaChangerTestingKnobs *scexec.TestingKnobs
@@ -1293,6 +1294,10 @@ type ExecutorConfig struct {
 	// access stores on this node.
 	KVStoresIterator kvserverbase.StoresIterator
 
+	// RangeDescIteratorFactory is used to construct Iterators over range
+	// descriptors.
+	RangeDescIteratorFactory rangedesc.IteratorFactory
+
 	// CollectionFactory is used to construct a descs.Collection.
 	CollectionFactory *descs.CollectionFactory
 
@@ -1328,7 +1333,7 @@ type ExecutorConfig struct {
 	// DescIDGenerator generates unique descriptor IDs.
 	DescIDGenerator eval.DescIDGenerator
 
-	// SyntheticPrivilegeCache
+	// SyntheticPrivilegeCache stores synthetic privileges in an in-memory cache.
 	SyntheticPrivilegeCache *cacheutil.Cache
 
 	// RangeStatsFetcher is used to fetch RangeStats.
@@ -1336,6 +1341,9 @@ type ExecutorConfig struct {
 
 	// EventsExporter is the client for the Observability Service.
 	EventsExporter obs.EventsExporter
+
+	// NodeDescs stores node descriptors in an in-memory cache.
+	NodeDescs kvcoord.NodeDescStore
 }
 
 // UpdateVersionSystemSettingHook provides a callback that allows us
@@ -1625,6 +1633,10 @@ type StreamingTestingKnobs struct {
 	// BeforeIngestionStart allows blocking the stream ingestion job
 	// before a stream ingestion happens.
 	BeforeIngestionStart func(ctx context.Context) error
+
+	// OverrideReplicationTTLSeconds will override the default value of the
+	// `ReplicationTTLSeconds` field on the StreamIngestion job details.
+	OverrideReplicationTTLSeconds int
 }
 
 var _ base.ModuleTestingKnobs = &StreamingTestingKnobs{}
@@ -1812,6 +1824,8 @@ func checkResultType(typ *types.T) error {
 	case types.TimeFamily:
 	case types.TimeTZFamily:
 	case types.TimestampTZFamily:
+	case types.TSQueryFamily:
+	case types.TSVectorFamily:
 	case types.IntervalFamily:
 	case types.JsonFamily:
 	case types.UuidFamily:

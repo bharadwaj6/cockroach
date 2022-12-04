@@ -13,6 +13,7 @@
 package execinfra
 
 import (
+	"context"
 	"time"
 
 	"github.com/cockroachdb/cockroach/pkg/base"
@@ -196,6 +197,13 @@ type ServerConfig struct {
 
 	// RangeStatsFetcher is used to fetch range stats for keys.
 	RangeStatsFetcher eval.RangeStatsFetcher
+
+	// AdmissionPacerFactory is used to integrate CPU-intensive work
+	// with elastic CPU control.
+	AdmissionPacerFactory admission.PacerFactory
+
+	// *sql.ExecutorConfig exposed as an interface (due to dependency cycles).
+	ExecutorConfig interface{}
 }
 
 // RuntimeStats is an interface through which the rowexec layer can get
@@ -298,8 +306,9 @@ type TestingKnobs struct {
 	ProcessorNoTracingSpan bool
 
 	// SetupFlowCb, when non-nil, is called by the execinfrapb.DistSQLServer
-	// when responding to SetupFlow RPCs.
-	SetupFlowCb func(base.SQLInstanceID, *execinfrapb.SetupFlowRequest) error
+	// when responding to SetupFlow RPCs, after the flow is set up but before it
+	// is started.
+	SetupFlowCb func(context.Context, base.SQLInstanceID, *execinfrapb.SetupFlowRequest) error
 }
 
 // ModuleTestingKnobs is part of the base.ModuleTestingKnobs interface.

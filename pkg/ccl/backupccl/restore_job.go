@@ -22,7 +22,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/ccl/backupccl/backuppb"
 	"github.com/cockroachdb/cockroach/pkg/cloud"
 	"github.com/cockroachdb/cockroach/pkg/cloud/cloudpb"
-	"github.com/cockroachdb/cockroach/pkg/clusterversion"
 	"github.com/cockroachdb/cockroach/pkg/jobs"
 	"github.com/cockroachdb/cockroach/pkg/jobs/joberror"
 	"github.com/cockroachdb/cockroach/pkg/jobs/jobspb"
@@ -34,7 +33,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
 	"github.com/cockroachdb/cockroach/pkg/sql"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog"
-	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catalogkeys"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/dbdesc"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descidgen"
@@ -719,6 +717,7 @@ func createImportingDescriptors(
 	err error,
 ) {
 	details := r.job.Details().(jobspb.RestoreDetails)
+	const kvTrace = false
 
 	var allMutableDescs []catalog.MutableDescriptor
 	var databases []catalog.DatabaseDescriptor
@@ -1028,6 +1027,7 @@ func createImportingDescriptors(
 								txn,
 								p.ExecCfg(),
 								descsCol,
+								p.ExtendedEvalContext().Tracing.KVTracingEnabled(),
 							); err != nil {
 								return err
 							}
@@ -1076,7 +1076,7 @@ func createImportingDescriptors(
 					db.AddSchemaToDatabase(sc.GetName(), descpb.DatabaseDescriptor_SchemaInfo{ID: sc.GetID()})
 				}
 				if err := descsCol.WriteDescToBatch(
-					ctx, false /* kvTrace */, db, b,
+					ctx, kvTrace, db, b,
 				); err != nil {
 					return err
 				}
@@ -1120,7 +1120,7 @@ func createImportingDescriptors(
 					}
 					typDesc.AddReferencingDescriptorID(table.GetID())
 					if err := descsCol.WriteDescToBatch(
-						ctx, false /* kvTrace */, typDesc, b,
+						ctx, kvTrace, typDesc, b,
 					); err != nil {
 						return err
 					}
@@ -1176,6 +1176,7 @@ func createImportingDescriptors(
 							ctx,
 							txn,
 							p.ExecCfg(),
+							p.ExtendedEvalContext().Tracing.KVTracingEnabled(),
 							descsCol,
 							regionConfig,
 							mutTable,
@@ -1978,6 +1979,7 @@ func (r *restoreResumer) publishDescriptors(
 
 	// Write the new descriptors and flip state over to public so they can be
 	// accessed.
+	const kvTrace = false
 
 	// Pre-fetch all the descriptors into the collection to avoid doing
 	// round-trips per descriptor.
@@ -2087,7 +2089,7 @@ func (r *restoreResumer) publishDescriptors(
 		d := desc.(catalog.MutableDescriptor)
 		d.SetPublic()
 		return descsCol.WriteDescToBatch(
-			ctx, false /* kvTrace */, d, b,
+			ctx, kvTrace, d, b,
 		)
 	}); err != nil {
 		return err
@@ -2283,6 +2285,7 @@ func (r *restoreResumer) dropDescriptors(
 	}
 
 	b := txn.NewBatch()
+	const kvTrace = false
 
 	// Collect the tables into mutable versions.
 	mutableTables := make([]*tabledesc.Mutable, len(details.TableDescs))
@@ -2356,8 +2359,9 @@ func (r *restoreResumer) dropDescriptors(
 		// data was never visible to users, and so we don't need to preserve MVCC
 		// semantics.
 		tableToDrop.DropTime = dropTime
-
-		b.Del(catalogkeys.EncodeNameKey(codec, tableToDrop))
+		if err := descsCol.DeleteNamespaceEntryToBatch(ctx, kvTrace, tableToDrop, b); err != nil {
+			return err
+		}
 		descsCol.NotifyOfDeletedDescriptor(tableToDrop.GetID())
 	}
 
@@ -2375,12 +2379,14 @@ func (r *restoreResumer) dropDescriptors(
 		if err != nil {
 			return err
 		}
-
-		b.Del(catalogkeys.EncodeNameKey(codec, typDesc))
 		mutType.SetDropped()
-		// Remove the system.descriptor entry.
-		b.Del(catalogkeys.MakeDescMetadataKey(codec, typDesc.ID))
-		descsCol.NotifyOfDeletedDescriptor(mutType.GetID())
+
+		if err := descsCol.DeleteNamespaceEntryToBatch(ctx, kvTrace, typDesc, b); err != nil {
+			return err
+		}
+		if err := descsCol.DeleteDescToBatch(ctx, kvTrace, typDesc.GetID(), b); err != nil {
+			return err
+		}
 	}
 
 	for i := range details.FunctionDescs {
@@ -2395,8 +2401,9 @@ func (r *restoreResumer) dropDescriptors(
 			return err
 		}
 		mutFn.SetDropped()
-		b.Del(catalogkeys.MakeDescMetadataKey(codec, fnDesc.ID))
-		descsCol.NotifyOfDeletedDescriptor(fnDesc.ID)
+		if err := descsCol.DeleteDescToBatch(ctx, kvTrace, fnDesc.ID, b); err != nil {
+			return err
+		}
 	}
 
 	// Queue a GC job.
@@ -2475,9 +2482,12 @@ func (r *restoreResumer) dropDescriptors(
 		}
 
 		// Delete schema entries in descriptor and namespace system tables.
-		b.Del(catalogkeys.EncodeNameKey(codec, mutSchema))
-		b.Del(catalogkeys.MakeDescMetadataKey(codec, mutSchema.GetID()))
-		descsCol.NotifyOfDeletedDescriptor(mutSchema.GetID())
+		if err := descsCol.DeleteNamespaceEntryToBatch(ctx, kvTrace, mutSchema, b); err != nil {
+			return err
+		}
+		if err := descsCol.DeleteDescToBatch(ctx, kvTrace, mutSchema.GetID(), b); err != nil {
+			return err
+		}
 		// Add dropped descriptor as uncommitted to satisfy descriptor validation.
 		mutSchema.SetDropped()
 		mutSchema.MaybeIncrementVersion()
@@ -2511,7 +2521,7 @@ func (r *restoreResumer) dropDescriptors(
 	for dbID, entry := range dbsWithDeletedSchemas {
 		log.Infof(ctx, "deleting %d schema entries from database %d", len(entry.schemas), dbID)
 		if err := descsCol.WriteDescToBatch(
-			ctx, false /* kvTrace */, entry.db, b,
+			ctx, kvTrace, entry.db, b,
 		); err != nil {
 			return err
 		}
@@ -2547,26 +2557,25 @@ func (r *restoreResumer) dropDescriptors(
 		if err := descsCol.AddUncommittedDescriptor(ctx, db); err != nil {
 			return err
 		}
-
-		descKey := catalogkeys.MakeDescMetadataKey(codec, db.GetID())
-		b.Del(descKey)
-
 		// We have explicitly to delete the system.namespace entry for the public schema
 		// if the database does not have a public schema backed by a descriptor.
-		if !db.(catalog.DatabaseDescriptor).HasPublicSchemaWithDescriptor() {
-			b.Del(catalogkeys.MakeSchemaNameKey(codec, db.GetID(), tree.PublicSchema))
+		if db := db.(catalog.DatabaseDescriptor); db.HasPublicSchemaWithDescriptor() {
+			if err := descsCol.DeleteDescriptorlessPublicSchemaToBatch(ctx, kvTrace, db, b); err != nil {
+				return err
+			}
 		}
-
-		nameKey := catalogkeys.MakeDatabaseNameKey(codec, db.GetName())
-		b.Del(nameKey)
-		descsCol.NotifyOfDeletedDescriptor(db.GetID())
+		if err := descsCol.DeleteNamespaceEntryToBatch(ctx, kvTrace, db, b); err != nil {
+			return err
+		}
+		if err := descsCol.DeleteDescToBatch(ctx, kvTrace, db.GetID(), b); err != nil {
+			return err
+		}
 		deletedDBs[db.GetID()] = struct{}{}
 	}
 
 	// Avoid telling the descriptor collection about the mutated descriptors
 	// until after all relevant relations have been retrieved to avoid a
 	// scenario whereby we make a descriptor invalid too early.
-	const kvTrace = false
 	for _, t := range mutableTables {
 		if err := descsCol.WriteDescToBatch(ctx, kvTrace, t, b); err != nil {
 			return errors.Wrap(err, "writing dropping table to batch")
@@ -2741,10 +2750,7 @@ func (r *restoreResumer) restoreSystemUsers(
 			return err
 		}
 
-		insertUser := `INSERT INTO system.users ("username", "hashedPassword", "isRole") VALUES ($1, $2, $3)`
-		if r.execCfg.Settings.Version.IsActive(ctx, clusterversion.V22_2AddSystemUserIDColumn) {
-			insertUser = `INSERT INTO system.users ("username", "hashedPassword", "isRole", "user_id") VALUES ($1, $2, $3, $4)`
-		}
+		insertUser := `INSERT INTO system.users ("username", "hashedPassword", "isRole", "user_id") VALUES ($1, $2, $3, $4)`
 		newUsernames := make(map[string]bool)
 		args := make([]interface{}, 4)
 		for _, user := range users {
@@ -2752,13 +2758,11 @@ func (r *restoreResumer) restoreSystemUsers(
 			args[0] = user[0]
 			args[1] = user[1]
 			args[2] = user[2]
-			if r.execCfg.Settings.Version.IsActive(ctx, clusterversion.V22_2AddSystemUserIDColumn) {
-				id, err := descidgen.GenerateUniqueRoleID(ctx, r.execCfg.DB, r.execCfg.Codec)
-				if err != nil {
-					return err
-				}
-				args[3] = id
+			id, err := descidgen.GenerateUniqueRoleID(ctx, r.execCfg.DB, r.execCfg.Codec)
+			if err != nil {
+				return err
 			}
+			args[3] = id
 			if _, err = executor.Exec(ctx, "insert-non-existent-users", txn, insertUser,
 				args...); err != nil {
 				return err

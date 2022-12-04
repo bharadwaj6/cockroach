@@ -25,6 +25,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"regexp"
+	"runtime/pprof"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -77,6 +78,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/systemschema"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/tabledesc"
 	"github.com/cockroachdb/cockroach/pkg/sql/execinfra"
+	"github.com/cockroachdb/cockroach/pkg/sql/execinfrapb"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgerror"
 	"github.com/cockroachdb/cockroach/pkg/sql/randgen"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/eval"
@@ -105,6 +107,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 	"github.com/cockroachdb/errors"
 	"github.com/cockroachdb/errors/oserror"
+	"github.com/cockroachdb/logtags"
 	"github.com/cockroachdb/redact"
 	"github.com/gogo/protobuf/proto"
 	pgx "github.com/jackc/pgx/v4"
@@ -205,6 +208,70 @@ func TestBackupRestoreMultiNodeRemote(t *testing.T) {
 	remoteFoo := "nodelocal://2/foo"
 
 	backupAndRestore(ctx, t, tc, []string{remoteFoo}, []string{localFoo}, numAccounts)
+}
+
+// TestBackupRestoreJobTagAndLabel runs a backup and restore and verifies that
+// the flows are executed remotely with a job log tag and a job pprof label.
+func TestBackupRestoreJobTagAndLabel(t *testing.T) {
+	defer leaktest.AfterTest(t)()
+	defer log.Scope(t).Close(t)
+
+	const numAccounts = 1000
+	ctx := context.Background()
+	getJobTag := func(ctx context.Context) string {
+		tags := logtags.FromContext(ctx)
+		if tags != nil {
+			for _, tag := range tags.Get() {
+				if tag.Key() == "job" {
+					return tag.ValueStr()
+				}
+			}
+		}
+		return ""
+	}
+	found := false
+	var mu syncutil.Mutex
+	// backupRestoreTestSetupWithParams() writes some data and then, within
+	// workloadsql.Setup() it splits and scatters the ranges. When using 3 nodes
+	// scatter means we only move leases which is usually enough. During stress or
+	// race we see that the leases may not be scattered because the other 2
+	// replicas are not yet initialized. In those cases the leases all stay on
+	// node 1 and therefore the flows run locally and the test fails (because
+	// 'found' stays false). The simple solution here is to use 4 nodes where
+	// scatter moves replicas in addition to leases.
+	numNodes := 4
+	tc, _, _, cleanupFn := backupRestoreTestSetupWithParams(t, numNodes, numAccounts, InitManualReplication,
+		base.TestClusterArgs{
+			ServerArgs: base.TestServerArgs{
+				DisableDefaultTestTenant: true,
+				Knobs: base.TestingKnobs{
+					DistSQL: &execinfra.TestingKnobs{
+						SetupFlowCb: func(ctx context.Context, _ base.SQLInstanceID, _ *execinfrapb.SetupFlowRequest) error {
+							mu.Lock()
+							defer mu.Unlock()
+							tag := getJobTag(ctx)
+							label, ok := pprof.Label(ctx, "job")
+							if tag == "" && !ok {
+								// Skip, it's not a job.
+								return nil
+							}
+							if tag == "" || !ok || tag != label {
+								log.Fatalf(ctx, "the job tag should exist and match the pprof label: tag=%s label=%s ctx=%s",
+									tag, label, ctx)
+							}
+							found = true
+							return nil
+						},
+					},
+				},
+			},
+		},
+	)
+	defer cleanupFn()
+
+	backupAndRestore(ctx, t, tc, []string{localFoo}, []string{localFoo}, numAccounts)
+
+	require.True(t, found)
 }
 
 func TestBackupRestorePartitioned(t *testing.T) {
@@ -669,7 +736,7 @@ func TestBackupAndRestoreJobDescription(t *testing.T) {
 	asOf1 := strings.TrimPrefix(matches[1], "/full")
 
 	sqlDB.CheckQueryResults(
-		t, "SELECT description FROM [SHOW JOBS] WHERE status != 'failed'",
+		t, "SELECT description FROM [SHOW JOBS] WHERE job_type != 'MIGRATION' AND status != 'failed'",
 		[][]string{
 			{fmt.Sprintf("BACKUP TO ('%s', '%s', '%s')", backups[0].(string), backups[1].(string),
 				backups[2].(string))},
@@ -5550,7 +5617,7 @@ func TestBackupRestoreShowJob(t *testing.T) {
 	// TODO (lucy): Update this if/when we decide to change how these jobs queued by
 	// the startup migration are handled.
 	sqlDB.CheckQueryResults(
-		t, "SELECT description FROM [SHOW JOBS] WHERE description != 'updating privileges' ORDER BY description",
+		t, "SELECT description FROM [SHOW JOBS] WHERE job_type != 'MIGRATION' AND description != 'updating privileges' ORDER BY description",
 		[][]string{
 			{"BACKUP DATABASE data TO 'nodelocal://0/foo' WITH revision_history = true"},
 			{"RESTORE TABLE data.bank FROM 'nodelocal://0/foo' WITH into_db = 'data 2', skip_missing_foreign_keys"},
@@ -6822,14 +6889,14 @@ func TestBackupRestoreTenant(t *testing.T) {
 		restoreDB := sqlutils.MakeSQLRunner(restoreTC.Conns[0])
 
 		restoreDB.CheckQueryResults(t, `select id, active, name, crdb_internal.pb_to_json('cockroach.sql.sqlbase.TenantInfo', info, true) from system.tenants`, [][]string{
-			{`1`, `true`, `system`, `{"droppedName": "", "id": "1", "name": "system", "state": "ACTIVE"}`},
+			{`1`, `true`, `system`, `{"droppedName": "", "id": "1", "name": "system", "state": "ACTIVE", "tenantReplicationJobId": "0"}`},
 		})
 		restoreDB.Exec(t, `RESTORE TENANT 10 FROM 'nodelocal://1/t10'`)
 		restoreDB.CheckQueryResults(t,
 			`SELECT id, active, name, crdb_internal.pb_to_json('cockroach.sql.sqlbase.TenantInfo', info, true) FROM system.tenants`,
 			[][]string{
-				{`1`, `true`, `system`, `{"droppedName": "", "id": "1", "name": "system", "state": "ACTIVE"}`},
-				{`10`, `true`, `NULL`, `{"droppedName": "", "id": "10", "name": "", "state": "ACTIVE"}`},
+				{`1`, `true`, `system`, `{"droppedName": "", "id": "1", "name": "system", "state": "ACTIVE", "tenantReplicationJobId": "0"}`},
+				{`10`, `true`, `NULL`, `{"droppedName": "", "id": "10", "name": "", "state": "ACTIVE", "tenantReplicationJobId": "0"}`},
 			},
 		)
 		restoreDB.CheckQueryResults(t,
@@ -6858,8 +6925,8 @@ func TestBackupRestoreTenant(t *testing.T) {
 		restoreDB.CheckQueryResults(t,
 			`select id, active, name, crdb_internal.pb_to_json('cockroach.sql.sqlbase.TenantInfo', info, true) from system.tenants`,
 			[][]string{
-				{`1`, `true`, `system`, `{"droppedName": "", "id": "1", "name": "system", "state": "ACTIVE"}`},
-				{`10`, `false`, `NULL`, `{"droppedName": "", "id": "10", "name": "", "state": "DROP"}`},
+				{`1`, `true`, `system`, `{"droppedName": "", "id": "1", "name": "system", "state": "ACTIVE", "tenantReplicationJobId": "0"}`},
+				{`10`, `false`, `NULL`, `{"droppedName": "", "id": "10", "name": "", "state": "DROP", "tenantReplicationJobId": "0"}`},
 			},
 		)
 
@@ -6883,8 +6950,8 @@ func TestBackupRestoreTenant(t *testing.T) {
 		restoreDB.CheckQueryResults(t,
 			`select id, active, name, crdb_internal.pb_to_json('cockroach.sql.sqlbase.TenantInfo', info, true) from system.tenants`,
 			[][]string{
-				{`1`, `true`, `system`, `{"droppedName": "", "id": "1", "name": "system", "state": "ACTIVE"}`},
-				{`10`, `true`, `NULL`, `{"droppedName": "", "id": "10", "name": "", "state": "ACTIVE"}`},
+				{`1`, `true`, `system`, `{"droppedName": "", "id": "1", "name": "system", "state": "ACTIVE", "tenantReplicationJobId": "0"}`},
+				{`10`, `true`, `NULL`, `{"droppedName": "", "id": "10", "name": "", "state": "ACTIVE", "tenantReplicationJobId": "0"}`},
 			},
 		)
 
@@ -6908,14 +6975,14 @@ func TestBackupRestoreTenant(t *testing.T) {
 		restoreDB.CheckQueryResults(t,
 			`select id, active, name, crdb_internal.pb_to_json('cockroach.sql.sqlbase.TenantInfo', info, true) from system.tenants`,
 			[][]string{
-				{`1`, `true`, `system`, `{"droppedName": "", "id": "1", "name": "system", "state": "ACTIVE"}`},
+				{`1`, `true`, `system`, `{"droppedName": "", "id": "1", "name": "system", "state": "ACTIVE", "tenantReplicationJobId": "0"}`},
 			})
 		restoreDB.Exec(t, `RESTORE TENANT 10 FROM 'nodelocal://1/t10'`)
 		restoreDB.CheckQueryResults(t,
 			`select id, active, name, crdb_internal.pb_to_json('cockroach.sql.sqlbase.TenantInfo', info, true) from system.tenants`,
 			[][]string{
-				{`1`, `true`, `system`, `{"droppedName": "", "id": "1", "name": "system", "state": "ACTIVE"}`},
-				{`10`, `true`, `NULL`, `{"droppedName": "", "id": "10", "name": "", "state": "ACTIVE"}`},
+				{`1`, `true`, `system`, `{"droppedName": "", "id": "1", "name": "system", "state": "ACTIVE", "tenantReplicationJobId": "0"}`},
+				{`10`, `true`, `NULL`, `{"droppedName": "", "id": "10", "name": "", "state": "ACTIVE", "tenantReplicationJobId": "0"}`},
 			},
 		)
 	})
@@ -6937,14 +7004,14 @@ func TestBackupRestoreTenant(t *testing.T) {
 		restoreDB.CheckQueryResults(t,
 			`select id, active, name, crdb_internal.pb_to_json('cockroach.sql.sqlbase.TenantInfo', info, true) from system.tenants`,
 			[][]string{
-				{`1`, `true`, `system`, `{"droppedName": "", "id": "1", "name": "system", "state": "ACTIVE"}`},
+				{`1`, `true`, `system`, `{"droppedName": "", "id": "1", "name": "system", "state": "ACTIVE", "tenantReplicationJobId": "0"}`},
 			})
 		restoreDB.Exec(t, `RESTORE TENANT 10 FROM 'nodelocal://1/clusterwide'`)
 		restoreDB.CheckQueryResults(t,
 			`select id, active, name, crdb_internal.pb_to_json('cockroach.sql.sqlbase.TenantInfo', info, true) from system.tenants`,
 			[][]string{
-				{`1`, `true`, `system`, `{"droppedName": "", "id": "1", "name": "system", "state": "ACTIVE"}`},
-				{`10`, `true`, `NULL`, `{"droppedName": "", "id": "10", "name": "", "state": "ACTIVE"}`},
+				{`1`, `true`, `system`, `{"droppedName": "", "id": "1", "name": "system", "state": "ACTIVE", "tenantReplicationJobId": "0"}`},
+				{`10`, `true`, `NULL`, `{"droppedName": "", "id": "10", "name": "", "state": "ACTIVE", "tenantReplicationJobId": "0"}`},
 			},
 		)
 
@@ -6977,16 +7044,16 @@ func TestBackupRestoreTenant(t *testing.T) {
 		restoreDB.CheckQueryResults(t,
 			`select id, active, name, crdb_internal.pb_to_json('cockroach.sql.sqlbase.TenantInfo', info, true) from system.tenants`,
 			[][]string{
-				{`1`, `true`, `system`, `{"droppedName": "", "id": "1", "name": "system", "state": "ACTIVE"}`},
+				{`1`, `true`, `system`, `{"droppedName": "", "id": "1", "name": "system", "state": "ACTIVE", "tenantReplicationJobId": "0"}`},
 			})
 		restoreDB.Exec(t, `RESTORE FROM 'nodelocal://1/clusterwide'`)
 		restoreDB.CheckQueryResults(t,
 			`select id, active, name, crdb_internal.pb_to_json('cockroach.sql.sqlbase.TenantInfo', info, true) from system.tenants`,
 			[][]string{
-				{`1`, `true`, `system`, `{"droppedName": "", "id": "1", "name": "system", "state": "ACTIVE"}`},
-				{`10`, `true`, `NULL`, `{"droppedName": "", "id": "10", "name": "", "state": "ACTIVE"}`},
-				{`11`, `true`, `NULL`, `{"droppedName": "", "id": "11", "name": "", "state": "ACTIVE"}`},
-				{`20`, `true`, `NULL`, `{"droppedName": "", "id": "20", "name": "", "state": "ACTIVE"}`},
+				{`1`, `true`, `system`, `{"droppedName": "", "id": "1", "name": "system", "state": "ACTIVE", "tenantReplicationJobId": "0"}`},
+				{`10`, `true`, `NULL`, `{"droppedName": "", "id": "10", "name": "", "state": "ACTIVE", "tenantReplicationJobId": "0"}`},
+				{`11`, `true`, `NULL`, `{"droppedName": "", "id": "11", "name": "", "state": "ACTIVE", "tenantReplicationJobId": "0"}`},
+				{`20`, `true`, `NULL`, `{"droppedName": "", "id": "20", "name": "", "state": "ACTIVE", "tenantReplicationJobId": "0"}`},
 			},
 		)
 
@@ -7226,8 +7293,6 @@ func TestBackupExportRequestTimeout(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
 
-	skip.WithIssue(t, 90646)
-
 	allowRequest := make(chan struct{})
 	defer close(allowRequest)
 
@@ -7262,7 +7327,7 @@ func TestBackupExportRequestTimeout(t *testing.T) {
 	// should hang. The timeout should save us in this case.
 	_, err := sqlSessions[1].DB.ExecContext(ctx, "BACKUP data.bank TO 'nodelocal://0/timeout'")
 	require.Regexp(t,
-		`timeout: operation "ExportRequest for span .*/Table/\d+/.*\" timed out after \S+ \(given timeout 3s\)`,
+		`exporting .*/Table/\d+/.*\: context deadline exceeded`,
 		err.Error())
 }
 
@@ -8338,6 +8403,10 @@ func TestBackupOnlyPublicIndexes(t *testing.T) {
 	//  6. Inc 3
 	//  7. Drop index
 	//  8. Inc 4
+
+	// Disable declarative schema changer for this test, until the knobs are updated.
+	sqlDB.Exec(t, "SET use_declarative_schema_changer='off';")
+	sqlDB.Exec(t, "SET CLUSTER SETTING sql.defaults.use_declarative_schema_changer='off';")
 
 	// First take a full backup.
 	fullBackup := localFoo + "/full"
@@ -10225,7 +10294,7 @@ $$;
 		require.Equal(t, 104, int(fnDesc.GetParentID()))
 		require.Equal(t, 106, int(fnDesc.GetParentSchemaID()))
 		require.Equal(t, "SELECT a FROM db1.sc1.tbl1;\nSELECT nextval(110:::REGCLASS);", fnDesc.GetFunctionBody())
-		require.Equal(t, 100108, int(fnDesc.GetArgs()[0].Type.Oid()))
+		require.Equal(t, 100108, int(fnDesc.GetParams()[0].Type.Oid()))
 		require.Equal(t, []descpb.ID{107, 110}, fnDesc.GetDependsOn())
 		require.Equal(t, []descpb.ID{108, 109}, fnDesc.GetDependsOnTypes())
 
@@ -10282,7 +10351,7 @@ $$;
 		require.Equal(t, 114, int(fnDesc.GetParentSchemaID()))
 		// Make sure db name and IDs are rewritten in function body.
 		require.Equal(t, "SELECT a FROM db1_new.sc1.tbl1;\nSELECT nextval(118:::REGCLASS);", fnDesc.GetFunctionBody())
-		require.Equal(t, 100116, int(fnDesc.GetArgs()[0].Type.Oid()))
+		require.Equal(t, 100116, int(fnDesc.GetParams()[0].Type.Oid()))
 		require.Equal(t, []descpb.ID{115, 118}, fnDesc.GetDependsOn())
 		require.Equal(t, []descpb.ID{116, 117}, fnDesc.GetDependsOnTypes())
 
@@ -10372,7 +10441,7 @@ $$;
 		require.Equal(t, 104, int(fnDesc.GetParentID()))
 		require.Equal(t, 106, int(fnDesc.GetParentSchemaID()))
 		require.Equal(t, "SELECT a FROM db1.sc1.tbl1;\nSELECT nextval(110:::REGCLASS);", fnDesc.GetFunctionBody())
-		require.Equal(t, 100108, int(fnDesc.GetArgs()[0].Type.Oid()))
+		require.Equal(t, 100108, int(fnDesc.GetParams()[0].Type.Oid()))
 		require.Equal(t, []descpb.ID{107, 110}, fnDesc.GetDependsOn())
 		require.Equal(t, []descpb.ID{108, 109}, fnDesc.GetDependsOnTypes())
 
@@ -10431,7 +10500,7 @@ $$;
 		require.Equal(t, 125, int(fnDesc.GetParentSchemaID()))
 		// Make sure db name and IDs are rewritten in function body.
 		require.Equal(t, "SELECT a FROM db1.sc1.tbl1;\nSELECT nextval(129:::REGCLASS);", fnDesc.GetFunctionBody())
-		require.Equal(t, 100127, int(fnDesc.GetArgs()[0].Type.Oid()))
+		require.Equal(t, 100127, int(fnDesc.GetParams()[0].Type.Oid()))
 		require.Equal(t, []descpb.ID{126, 129}, fnDesc.GetDependsOn())
 		require.Equal(t, []descpb.ID{127, 128}, fnDesc.GetDependsOnTypes())
 

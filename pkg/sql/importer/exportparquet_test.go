@@ -20,8 +20,7 @@ import (
 	"testing"
 
 	"github.com/cockroachdb/cockroach/pkg/base"
-	_ "github.com/cockroachdb/cockroach/pkg/ccl"
-	"github.com/cockroachdb/cockroach/pkg/ccl/utilccl"
+	"github.com/cockroachdb/cockroach/pkg/ccl"
 	"github.com/cockroachdb/cockroach/pkg/security/username"
 	"github.com/cockroachdb/cockroach/pkg/sql"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/colinfo"
@@ -162,7 +161,7 @@ func validateDatum(t *testing.T, expected tree.Datum, actual tree.Datum, typ *ty
 		eArr := expected.(*tree.DArray)
 		aArr := actual.(*tree.DArray)
 		for i := 0; i < eArr.Len(); i++ {
-			validateDatum(t, eArr.Array[i], aArr.Array[i], typ.ArrayContents())
+			validateDatum(t, tree.UnwrapDOidWrapper(eArr.Array[i]), aArr.Array[i], typ.ArrayContents())
 		}
 	case types.DateFamily:
 		// pgDate.orig property doesn't matter and can cause the test to fail
@@ -196,7 +195,7 @@ func TestRandomParquetExports(t *testing.T) {
 	defer log.Scope(t).Close(t)
 	dir, dirCleanupFn := testutils.TempDir(t)
 	defer dirCleanupFn()
-	defer utilccl.TestingEnableEnterprise()()
+	defer ccl.TestingEnableEnterprise()()
 	dbName := "rand"
 	srv, db, _ := serverutils.StartServer(t, base.TestServerArgs{
 		// Test fails when run within a test tenant. More
