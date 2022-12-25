@@ -179,6 +179,12 @@ type CommonLookupFlags struct {
 	// ParentID enforces that the resolved descriptor exist with this parent
 	// ID if non-zero.
 	ParentID catid.DescID
+	// SkipHydration enforce descriptor lookups to skip hydration. This can be set
+	// to true only when looking up descriptors when hydrating another group of
+	// descriptors. The purpose is to avoid potential infinite recursion loop when
+	// trying to hydrate a descriptor which would lead to hydration of another
+	// descriptor depends on it.
+	SkipHydration bool
 }
 
 // SchemaLookupFlags is the flag struct suitable for GetSchemaByName().
@@ -188,12 +194,7 @@ type SchemaLookupFlags = CommonLookupFlags
 type DatabaseLookupFlags = CommonLookupFlags
 
 // DatabaseListFlags is the flag struct suitable for GetObjectNamesAndIDs().
-type DatabaseListFlags struct {
-	CommonLookupFlags
-	// ExplicitPrefix, when set, will cause the returned table names to
-	// have an explicit schema and catalog part.
-	ExplicitPrefix bool
-}
+type DatabaseListFlags = CommonLookupFlags
 
 // DesiredObjectKind represents what kind of object is desired in a name
 // resolution attempt.
@@ -274,4 +275,18 @@ func ObjectLookupFlagsWithRequiredTableKind(kind RequiredTableKind) ObjectLookup
 		DesiredObjectKind:    TableObject,
 		DesiredTableDescKind: kind,
 	}
+}
+
+// IndexLookupFlags is the flag struct used for resolver.ResolveIndex() only.
+type IndexLookupFlags struct {
+	// Required, if true, indicates lookup can return nil index without
+	// returning an error if the index does not exist.
+	Required bool
+	// IncludeNonActiveIndex expands the lookup to also consider
+	// non-active indexes. By default, only active indexes are
+	// considered.
+	IncludeNonActiveIndex bool
+	// IncludeOfflineTable expands the lookup to also consider offline
+	// tables. By default, only online tables are considered.
+	IncludeOfflineTable bool
 }

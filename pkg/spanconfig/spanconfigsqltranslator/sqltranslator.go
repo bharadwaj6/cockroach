@@ -336,7 +336,7 @@ func (s *SQLTranslator) generateSpanConfigurationsForNamedZone(
 		return nil, errors.AssertionFailedf("unknown named zone config %s", name)
 	}
 
-	zoneConfig, err := sql.GetHydratedZoneConfigForNamedZone(ctx, txn, s.codec, name)
+	zoneConfig, err := sql.GetHydratedZoneConfigForNamedZone(ctx, txn, s.txnBundle.descsCol, name)
 	if err != nil {
 		return nil, err
 	}
@@ -368,7 +368,7 @@ func (s *SQLTranslator) generateSpanConfigurationsForTable(
 		return nil, nil
 	}
 
-	zone, err := sql.GetHydratedZoneConfigForTable(ctx, txn, s.codec, table.GetID())
+	zone, err := sql.GetHydratedZoneConfigForTable(ctx, txn, s.txnBundle.descsCol, table.GetID())
 	if err != nil {
 		return nil, err
 	}
@@ -574,15 +574,22 @@ func (s *SQLTranslator) findDescendantLeafIDsForDescriptor(
 
 	// Expand the database descriptor to all the tables inside it and return their
 	// IDs.
-	tables, err := descsCol.GetAllTableDescriptorsInDatabase(ctx, txn, db)
+
+	// GetAll is the only way to retrieve dropped descriptors whose IDs are not known
+	// ahead of time. This has unfortunate performance implications tracked by
+	// https://github.com/cockroachdb/cockroach/issues/90655
+	all, err := descsCol.GetAll(ctx, txn)
 	if err != nil {
 		return nil, err
 	}
-	ret := make(descpb.IDs, 0, len(tables))
-	for _, table := range tables {
-		ret = append(ret, table.GetID())
-	}
-	return ret, nil
+	var ret catalog.DescriptorIDSet
+	_ = all.ForEachDescriptor(func(desc catalog.Descriptor) error {
+		if desc.GetParentID() == db.GetID() && desc.DescriptorType() == catalog.Table {
+			ret.Add(desc.GetID())
+		}
+		return nil
+	})
+	return ret.Ordered(), nil
 }
 
 // findDescendantLeafIDsForNamedZone finds all leaf IDs below the given named
@@ -670,7 +677,7 @@ func (s *SQLTranslator) maybeGeneratePseudoTableRecords(
 		//      emulate. As for what config to apply over said range -- we do as
 		//      the system config span does, applying the config for the system
 		//      database.
-		zone, err := sql.GetHydratedZoneConfigForDatabase(ctx, txn, s.codec, keys.SystemDatabaseID)
+		zone, err := sql.GetHydratedZoneConfigForDatabase(ctx, txn, s.txnBundle.descsCol, keys.SystemDatabaseID)
 		if err != nil {
 			return nil, err
 		}
@@ -707,7 +714,7 @@ func (s *SQLTranslator) maybeGenerateScratchRangeRecord(
 			continue // nothing to do
 		}
 
-		zone, err := sql.GetHydratedZoneConfigForDatabase(ctx, txn, s.codec, keys.RootNamespaceID)
+		zone, err := sql.GetHydratedZoneConfigForDatabase(ctx, txn, s.txnBundle.descsCol, keys.RootNamespaceID)
 		if err != nil {
 			return spanconfig.Record{}, err
 		}

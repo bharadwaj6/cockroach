@@ -30,6 +30,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/settings"
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catenumpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/colinfo"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/colflow"
@@ -49,10 +50,10 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/span"
 	"github.com/cockroachdb/cockroach/pkg/sql/sqlinstance"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
-	"github.com/cockroachdb/cockroach/pkg/util"
 	"github.com/cockroachdb/cockroach/pkg/util/buildutil"
 	"github.com/cockroachdb/cockroach/pkg/util/encoding"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
+	"github.com/cockroachdb/cockroach/pkg/util/intsets"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/quotapool"
 	"github.com/cockroachdb/cockroach/pkg/util/randutil"
@@ -755,7 +756,7 @@ type PlanningCtx struct {
 	// any PhysicalPlan we generate with this context.
 	nodeStatuses map[base.SQLInstanceID]NodeStatus
 
-	infra physicalplan.PhysicalInfrastructure
+	infra *physicalplan.PhysicalInfrastructure
 
 	// isLocal is set to true if we're planning this query on a single node.
 	isLocal  bool
@@ -793,7 +794,7 @@ type PlanningCtx struct {
 	// onFlowCleanup contains non-nil functions that will be called after the
 	// local flow finished running and is being cleaned up. It allows us to
 	// release the resources that are acquired during the physical planning and
-	// are being hold onto throughout the whole flow lifecycle.
+	// are being held onto throughout the whole flow lifecycle.
 	onFlowCleanup []func()
 }
 
@@ -806,7 +807,7 @@ var _ physicalplan.ExprContext = &PlanningCtx{}
 // they have to be part of the final plan.
 func (p *PlanningCtx) NewPhysicalPlan() *PhysicalPlan {
 	return &PhysicalPlan{
-		PhysicalPlan: physicalplan.MakePhysicalPlan(&p.infra),
+		PhysicalPlan: physicalplan.MakePhysicalPlan(p.infra),
 	}
 }
 
@@ -847,12 +848,11 @@ func (p *PlanningCtx) getDefaultSaveFlowsFunc(
 			flowCtx, cleanup := newFlowCtxForExplainPurposes(ctx, p, planner)
 			defer cleanup()
 			getExplain := func(verbose bool) []string {
-				explain, cleanup, err := colflow.ExplainVec(
+				explain, err := colflow.ExplainVec(
 					ctx, flowCtx, flows, p.infra.LocalProcessors, opChains,
 					planner.extendedEvalCtx.DistSQLPlanner.gatewaySQLInstanceID,
 					verbose, planner.curPlan.flags.IsDistributed(),
 				)
-				cleanup()
 				if err != nil {
 					// In some edge cases (like when subqueries are present or
 					// when certain component doesn't implement execopnode.OpNode
@@ -1940,10 +1940,90 @@ func (dsp *DistSQLPlanner) planAggregators(
 		groupCols[i] = uint32(p.PlanToStreamColMap[idx])
 	}
 	orderedGroupCols := make([]uint32, len(info.groupColOrdering))
-	var orderedGroupColSet util.FastIntSet
+	var orderedGroupColSet intsets.Fast
 	for i, c := range info.groupColOrdering {
 		orderedGroupCols[i] = uint32(p.PlanToStreamColMap[c.ColIdx])
 		orderedGroupColSet.Add(c.ColIdx)
+	}
+
+	// planHashGroupJoin tracks whether we should plan a hash group-join for the
+	// first stage of aggregators (either local if multi-stage or final if
+	// single-stage), which is the case when
+	//   1. the corresponding session variable is enabled
+	//   2. the input stage are hash joiners
+	//      2.1. there is no ON expression
+	//      2.2. the PostProcessSpec can only be a pass-through or a simple
+	//           projection (i.e. no rendering, limits, nor offsets)
+	//      2.3. only inner and outer joins are supported at the moment
+	//   3. the join's equality columns are exactly the same as the
+	//      aggregation's grouping columns
+	//      3.1. the join's equality columns must be non-empty
+	//   4. the first stage we're planning are hash aggregators
+	//   5. the distribution of the joiners and the first stage of aggregators
+	//      is the same (i.e. both either local or distributed).
+	//      TODO(yuzefovich): we could consider lifting the condition 5. by
+	//      changing the distribution of the hash joiner stager.
+	planHashGroupJoin := planCtx.ExtendedEvalCtx.SessionData().ExperimentalHashGroupJoinEnabled
+	if planHashGroupJoin { // condition 1.
+		planHashGroupJoin = func() bool {
+			prevStageProc := p.Processors[p.ResultRouters[0]].Spec
+			hjSpec := prevStageProc.Core.HashJoiner
+			if hjSpec == nil {
+				return false // condition 2.
+			}
+			if !hjSpec.OnExpr.Empty() {
+				return false // condition 2.1.
+			}
+			pps := prevStageProc.Post
+			if pps.RenderExprs != nil || pps.Limit != 0 || pps.Offset != 0 {
+				return false // condition 2.2.
+			}
+			switch hjSpec.Type {
+			case descpb.InnerJoin, descpb.LeftOuterJoin, descpb.RightOuterJoin, descpb.FullOuterJoin:
+			default:
+				return false // condition 2.3.
+			}
+			if len(hjSpec.LeftEqColumns) != len(groupCols) {
+				return false // condition 3.
+			}
+			if len(hjSpec.LeftEqColumns) == 0 {
+				return false // condition 3.1.
+			}
+			if len(groupCols) == len(orderedGroupCols) {
+				// We will plan streaming aggregation. We shouldn't really ever
+				// get here since the hash join doesn't provide any ordering,
+				// but we want to be safe.
+				return false // condition 4.
+			}
+			// Join's equality columns refer to columns from the join's inputs
+			// whereas the grouping columns refer to the join's output columns.
+			// Thus, we need to translate one or the other to the common
+			// denominator, and we choose to map the grouping columns to the
+			// ordinals of the join's inputs.
+			//
+			// If we define `m` and `n` as the number of columns from the
+			// left and right inputs of the join, respectively, then columns
+			// 0, 1, ..., m-1 refer to the corresponding "left" columns whereas
+			// m, m+1, ..., m+n-1 refer to the "right" ones.
+			var joinEqCols intsets.Fast
+			m := len(prevStageProc.Input[0].ColumnTypes)
+			for _, leftEqCol := range hjSpec.LeftEqColumns {
+				joinEqCols.Add(int(leftEqCol))
+			}
+			for _, rightEqCol := range hjSpec.RightEqColumns {
+				joinEqCols.Add(m + int(rightEqCol))
+			}
+			for _, groupCol := range groupCols {
+				mappedCol := groupCol
+				if pps.OutputColumns != nil {
+					mappedCol = pps.OutputColumns[groupCol]
+				}
+				if !joinEqCols.Contains(int(mappedCol)) {
+					return false // condition 3.
+				}
+			}
+			return true
+		}()
 	}
 
 	// We can have a local stage of distinct processors if all aggregation
@@ -1956,7 +2036,7 @@ func (dsp *DistSQLPlanner) planAggregators(
 		}
 	}
 	if allDistinct {
-		var distinctColumnsSet util.FastIntSet
+		var distinctColumnsSet intsets.Fast
 		for _, e := range info.aggregations {
 			for _, colIdx := range e.ColIdx {
 				distinctColumnsSet.Add(int(colIdx))
@@ -1992,6 +2072,12 @@ func (dsp *DistSQLPlanner) planAggregators(
 			// Add distinct processors local to each existing current result
 			// processor.
 			p.AddNoGroupingStage(distinctSpec, execinfrapb.PostProcessSpec{}, inputTypes, p.MergeOrdering)
+
+			// The condition 4. above is not satisfied since we've just added
+			// a distinct stage before the first aggregation one.
+			// TODO(yuzefovich): re-evaluate whether it is worth skipping this
+			// local distinct stage in favor of getting hash group-join planned.
+			planHashGroupJoin = false
 		}
 	}
 
@@ -2023,6 +2109,11 @@ func (dsp *DistSQLPlanner) planAggregators(
 				multiStage = false
 				break
 			}
+		}
+		if !multiStage {
+			// The joiners are distributed whereas the aggregation cannot be
+			// distributed which fails condition 5.
+			planHashGroupJoin = false
 		}
 	}
 
@@ -2264,12 +2355,31 @@ func (dsp *DistSQLPlanner) planAggregators(
 			OutputOrdering:   execinfrapb.Ordering{Columns: ordCols},
 		}
 
-		p.AddNoGroupingStage(
-			execinfrapb.ProcessorCoreUnion{Aggregator: &localAggsSpec},
-			execinfrapb.PostProcessSpec{},
-			intermediateTypes,
-			execinfrapb.Ordering{Columns: ordCols},
-		)
+		if planHashGroupJoin {
+			prevStageProc := p.Processors[p.ResultRouters[0]].Spec
+			hjSpec := prevStageProc.Core.HashJoiner
+			pps := prevStageProc.Post
+			hgjSpec := execinfrapb.HashGroupJoinerSpec{
+				HashJoinerSpec:    *hjSpec,
+				JoinOutputColumns: pps.OutputColumns,
+				AggregatorSpec:    localAggsSpec,
+			}
+			p.ReplaceLastStage(
+				execinfrapb.ProcessorCoreUnion{HashGroupJoiner: &hgjSpec},
+				execinfrapb.PostProcessSpec{},
+				intermediateTypes,
+				execinfrapb.Ordering{Columns: ordCols},
+			)
+			// Let the final aggregation be planned as normal.
+			planHashGroupJoin = false
+		} else {
+			p.AddNoGroupingStage(
+				execinfrapb.ProcessorCoreUnion{Aggregator: &localAggsSpec},
+				execinfrapb.PostProcessSpec{},
+				intermediateTypes,
+				execinfrapb.Ordering{Columns: ordCols},
+			)
+		}
 
 		finalAggsSpec = execinfrapb.AggregatorSpec{
 			Type:             aggType,
@@ -2358,7 +2468,22 @@ func (dsp *DistSQLPlanner) planAggregators(
 	// has been programmed to produce the same columns as the groupNode.
 	p.PlanToStreamColMap = identityMap(p.PlanToStreamColMap, len(info.aggregations))
 
-	if len(finalAggsSpec.GroupCols) == 0 || len(p.ResultRouters) == 1 {
+	if planHashGroupJoin {
+		prevStageProc := p.Processors[p.ResultRouters[0]].Spec
+		hjSpec := prevStageProc.Core.HashJoiner
+		pps := prevStageProc.Post
+		hgjSpec := execinfrapb.HashGroupJoinerSpec{
+			HashJoinerSpec:    *hjSpec,
+			JoinOutputColumns: pps.OutputColumns,
+			AggregatorSpec:    finalAggsSpec,
+		}
+		p.ReplaceLastStage(
+			execinfrapb.ProcessorCoreUnion{HashGroupJoiner: &hgjSpec},
+			execinfrapb.PostProcessSpec{},
+			finalOutTypes,
+			dsp.convertOrdering(info.reqOrdering, p.PlanToStreamColMap),
+		)
+	} else if len(finalAggsSpec.GroupCols) == 0 || len(p.ResultRouters) == 1 {
 		// No GROUP BY, or we have a single stream. Use a single final aggregator.
 		// If the previous stage was all on a single node, put the final
 		// aggregator there. Otherwise, bring the results back on this node.
@@ -2466,7 +2591,7 @@ func (dsp *DistSQLPlanner) createPlanForIndexJoin(
 	}
 
 	fetchColIDs := make([]descpb.ColumnID, len(n.cols))
-	var fetchOrdinals util.FastIntSet
+	var fetchOrdinals intsets.Fast
 	for i := range n.cols {
 		fetchColIDs[i] = n.cols[i].GetID()
 		fetchOrdinals.Add(n.cols[i].Ordinal())
@@ -2522,17 +2647,14 @@ func (dsp *DistSQLPlanner) createPlanForLookupJoin(
 
 	// If any of the ordering columns originate from the lookup table, this is a
 	// case where we are ordering on a prefix of input columns followed by the
-	// lookup columns. We need to maintain the index ordering on each lookup.
+	// lookup columns.
 	var maintainLookupOrdering bool
 	numInputCols := len(plan.GetResultTypes())
 	for i := range n.reqOrdering {
 		if n.reqOrdering[i].ColIdx >= numInputCols {
+			// We need to maintain the index ordering on each lookup.
 			maintainLookupOrdering = true
-			if n.reqOrdering[i].Direction == encoding.Descending {
-				// Validate that an ordering on lookup columns does not contain
-				// descending columns.
-				panic(errors.AssertionFailedf("ordering on a lookup index with descending columns"))
-			}
+			break
 		}
 	}
 
@@ -2552,7 +2674,7 @@ func (dsp *DistSQLPlanner) createPlanForLookupJoin(
 	}
 
 	fetchColIDs := make([]descpb.ColumnID, len(n.table.cols))
-	var fetchOrdinals util.FastIntSet
+	var fetchOrdinals intsets.Fast
 	for i := range n.table.cols {
 		fetchColIDs[i] = n.table.cols[i].GetID()
 		fetchOrdinals.Add(n.table.cols[i].Ordinal())
@@ -3107,8 +3229,8 @@ func (dsp *DistSQLPlanner) createPhysPlan(
 	ctx context.Context, planCtx *PlanningCtx, plan planMaybePhysical,
 ) (physPlan *PhysicalPlan, cleanup func(), err error) {
 	if plan.isPhysicalPlan() {
-		// TODO(yuzefovich): figure out how to propagate
-		// planCtx.getCleanupFunc() from the experimental DistSQL spec factory.
+		// Note that planCtx.getCleanupFunc() is already set in
+		// plan.physPlan.onClose, so here we return a noop cleanup function.
 		return plan.physPlan.PhysicalPlan, func() {}, nil
 	}
 	physPlan, err = dsp.createPhysPlanForPlanNode(ctx, planCtx, plan.planNode)
@@ -3411,7 +3533,7 @@ func (dsp *DistSQLPlanner) createValuesSpec(
 	}
 
 	for i, t := range resultTypes {
-		s.Columns[i].Encoding = descpb.DatumEncoding_VALUE
+		s.Columns[i].Encoding = catenumpb.DatumEncoding_VALUE
 		s.Columns[i].Type = t
 	}
 
@@ -3466,7 +3588,7 @@ func (dsp *DistSQLPlanner) createValuesSpecFromTuples(
 				return nil, err
 			}
 			encDatum := rowenc.DatumToEncDatum(resultTypes[colIdx], datum)
-			buf, err = encDatum.Encode(resultTypes[colIdx], &a, descpb.DatumEncoding_VALUE, buf)
+			buf, err = encDatum.Encode(resultTypes[colIdx], &a, catenumpb.DatumEncoding_VALUE, buf)
 			if err != nil {
 				return nil, err
 			}
@@ -4233,11 +4355,17 @@ func (dsp *DistSQLPlanner) NewPlanningCtx(
 	distributionType DistributionType,
 ) *PlanningCtx {
 	distribute := distributionType == DistributionTypeAlways || (distributionType == DistributionTypeSystemTenantOnly && evalCtx.Codec.ForSystemTenant())
+	infra := physicalplan.NewPhysicalInfrastructure(uuid.FastMakeV4(), dsp.gatewaySQLInstanceID)
 	planCtx := &PlanningCtx{
 		ExtendedEvalCtx: evalCtx,
-		infra:           physicalplan.MakePhysicalInfrastructure(uuid.FastMakeV4(), dsp.gatewaySQLInstanceID),
+		infra:           infra,
 		isLocal:         !distribute,
 		planner:         planner,
+		// Make sure to release the physical infrastructure after the execution
+		// finishes. Note that onFlowCleanup might not be called in some cases
+		// (when DistSQLPlanner.Run is not called), but that is ok since on the
+		// main query path it will get called.
+		onFlowCleanup: []func(){infra.Release},
 	}
 	if !distribute {
 		if planner == nil || dsp.spanResolver == nil || planner.curPlan.flags.IsSet(planFlagContainsMutation) {

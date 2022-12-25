@@ -19,8 +19,8 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/leaktest"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/stretchr/testify/assert"
-	"go.etcd.io/etcd/raft/v3"
-	"go.etcd.io/etcd/raft/v3/tracker"
+	"go.etcd.io/raft/v3"
+	"go.etcd.io/raft/v3/tracker"
 )
 
 type testSplitDelayHelper struct {
@@ -139,10 +139,10 @@ func TestSplitDelayToAvoidSnapshot(t *testing.T) {
 			st := statusWithState(raft.StateLeader)
 			st.Progress = map[uint64]tracker.Progress{
 				2: {
-					State:        state,
-					RecentActive: true,
-					ProbeSent:    true, // Unifies string output below.
-					Inflights:    &tracker.Inflights{},
+					State:            state,
+					RecentActive:     true,
+					MsgAppFlowPaused: true, // Unifies string output below.
+					Inflights:        &tracker.Inflights{},
 				},
 				// Healthy follower just for kicks.
 				3: {State: tracker.StateReplicate},

@@ -20,8 +20,8 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/memsize"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
-	"github.com/cockroachdb/cockroach/pkg/util"
 	"github.com/cockroachdb/cockroach/pkg/util/buildutil"
+	"github.com/cockroachdb/cockroach/pkg/util/intsets"
 	"github.com/cockroachdb/cockroach/pkg/util/mon"
 	"github.com/cockroachdb/errors"
 )
@@ -412,14 +412,14 @@ func (a *Allocator) MaybeAppendColumn(b coldata.Batch, t *types.T, colIdx int) {
 		// We have a vector with an unexpected type, so we panic.
 		colexecerror.InternalError(errors.AssertionFailedf(
 			"trying to add a column of %s type at index %d but %s vector already present",
-			t, colIdx, presentType,
+			t.SQLString(), colIdx, presentType.SQLString(),
 		))
 	} else if colIdx > width {
 		// We have a batch of unexpected width which indicates an error in the
 		// planning stage.
 		colexecerror.InternalError(errors.AssertionFailedf(
 			"trying to add a column of %s type at index %d but batch has width %d",
-			t, colIdx, width,
+			t.SQLString(), colIdx, width,
 		))
 	}
 	estimatedMemoryUsage := EstimateBatchSizeBytes([]*types.T{t}, desiredCapacity)
@@ -616,7 +616,7 @@ func EstimateBatchSizeBytes(vecTypes []*types.T, batchLength int) int64 {
 			// Types that have a statically known size.
 			acc += GetFixedSizeTypeSize(t)
 		default:
-			colexecerror.InternalError(errors.AssertionFailedf("unhandled type %s", t))
+			colexecerror.InternalError(errors.AssertionFailedf("unhandled type %s", t.SQLString()))
 		}
 	}
 	// For byte arrays, we initially allocate a constant number of bytes for
@@ -657,7 +657,7 @@ func GetFixedSizeTypeSize(t *types.T) (size int64) {
 	case types.IntervalFamily:
 		size = memsize.Duration
 	default:
-		colexecerror.InternalError(errors.AssertionFailedf("unhandled type %s", t))
+		colexecerror.InternalError(errors.AssertionFailedf("unhandled type %s", t.SQLString()))
 	}
 	return size
 }
@@ -821,7 +821,7 @@ type SetAccountingHelper struct {
 	allFixedLength bool
 
 	// bytesLikeVecIdxs stores the indices of all bytes-like vectors.
-	bytesLikeVecIdxs util.FastIntSet
+	bytesLikeVecIdxs intsets.Fast
 	// bytesLikeVectors stores all actual bytes-like vectors. It is updated
 	// every time a new batch is allocated.
 	bytesLikeVectors []*coldata.Bytes
@@ -830,7 +830,7 @@ type SetAccountingHelper struct {
 	prevBytesLikeTotalSize int64
 
 	// decimalVecIdxs stores the indices of all decimal vectors.
-	decimalVecIdxs util.FastIntSet
+	decimalVecIdxs intsets.Fast
 	// decimalVecs stores all decimal vectors. They are updated every time a new
 	// batch is allocated.
 	decimalVecs []coldata.Decimals
@@ -849,7 +849,7 @@ type SetAccountingHelper struct {
 
 	// varLenDatumVecIdxs stores the indices of all datum-backed vectors with
 	// variable-length values.
-	varLenDatumVecIdxs util.FastIntSet
+	varLenDatumVecIdxs intsets.Fast
 	// varLenDatumVecs stores all variable-sized datum-backed vectors. They are
 	// updated every time a new batch is allocated.
 	varLenDatumVecs []coldata.DatumVec
@@ -910,10 +910,13 @@ func (h *SetAccountingHelper) ResetMaybeReallocate(
 		if !h.bytesLikeVecIdxs.Empty() {
 			h.bytesLikeVectors = h.bytesLikeVectors[:0]
 			for vecIdx, ok := h.bytesLikeVecIdxs.Next(0); ok; vecIdx, ok = h.bytesLikeVecIdxs.Next(vecIdx + 1) {
-				if vecs[vecIdx].CanonicalTypeFamily() == types.BytesFamily {
+				switch vecs[vecIdx].CanonicalTypeFamily() {
+				case types.BytesFamily:
 					h.bytesLikeVectors = append(h.bytesLikeVectors, vecs[vecIdx].Bytes())
-				} else {
+				case types.JsonFamily:
 					h.bytesLikeVectors = append(h.bytesLikeVectors, &vecs[vecIdx].JSON().Bytes)
+				default:
+					colexecerror.InternalError(errors.AssertionFailedf("unexpected bytes-like type: %s", typs[vecIdx].SQLString()))
 				}
 			}
 			h.prevBytesLikeTotalSize = h.getBytesLikeTotalSize()

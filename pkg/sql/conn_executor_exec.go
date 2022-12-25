@@ -16,22 +16,22 @@ import (
 	"encoding/base64"
 	"fmt"
 	"runtime/pprof"
-	"strconv"
 	"strings"
 	"time"
 
 	"github.com/cockroachdb/cockroach/pkg/jobs"
 	"github.com/cockroachdb/cockroach/pkg/jobs/jobspb"
 	"github.com/cockroachdb/cockroach/pkg/kv"
+	"github.com/cockroachdb/cockroach/pkg/multitenant"
 	"github.com/cockroachdb/cockroach/pkg/multitenant/multitenantcpu"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
+	"github.com/cockroachdb/cockroach/pkg/server/serverpb"
 	"github.com/cockroachdb/cockroach/pkg/server/telemetry"
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/colinfo"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descs"
 	"github.com/cockroachdb/cockroach/pkg/sql/clusterunique"
 	"github.com/cockroachdb/cockroach/pkg/sql/contentionpb"
-	"github.com/cockroachdb/cockroach/pkg/sql/delegate"
 	"github.com/cockroachdb/cockroach/pkg/sql/execstats"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/exec/explain"
 	"github.com/cockroachdb/cockroach/pkg/sql/paramparse"
@@ -41,6 +41,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/physicalplan"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/eval"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
+	"github.com/cockroachdb/cockroach/pkg/sql/sessiondata"
 	"github.com/cockroachdb/cockroach/pkg/sql/sessiondatapb"
 	"github.com/cockroachdb/cockroach/pkg/sql/sessionphase"
 	"github.com/cockroachdb/cockroach/pkg/sql/sqlerrors"
@@ -312,6 +313,9 @@ func (ex *connExecutor) execStmtInOpenState(
 	ctx, cancelQuery = contextutil.WithCancel(ctx)
 	ex.addActiveQuery(parserStmt, pinfo, queryID, cancelQuery)
 
+	// Check if query is internal.
+	isInternal := ex.executorType == executorTypeInternal || ex.planner.isInternalPlanner
+
 	// Make sure that we always unregister the query. It also deals with
 	// overwriting res.Error to a more user-friendly message in case of query
 	// cancellation.
@@ -331,26 +335,40 @@ func (ex *connExecutor) execStmtInOpenState(
 			}
 		}
 
-		// Detect context cancelation and overwrite whatever error might have been
-		// set on the result before. The idea is that once the query's context is
-		// canceled, all sorts of actors can detect the cancelation and set all
-		// sorts of errors on the result. Rather than trying to impose discipline
-		// in that jungle, we just overwrite them all here with an error that's
-		// nicer to look at for the client.
-		if res != nil && ctx.Err() != nil && res.Err() != nil {
-			// Even in the cases where the error is a retryable error, we want to
-			// intercept the event and payload returned here to ensure that the query
-			// is not retried.
-			retEv = eventNonRetriableErr{
-				IsCommit: fsm.FromBool(isCommit(ast)),
-			}
-			res.SetError(cancelchecker.QueryCanceledError)
-			retPayload = eventNonRetriableErrPayload{err: cancelchecker.QueryCanceledError}
-		}
+		// Disconnect the query from the ActiveQueries structure.
+		// This will prevent concurrent access to the queryMeta
+		// from this point onwards.
+		qm := ex.removeActiveQuery(queryID, ast)
 
-		ex.removeActiveQuery(queryID, ast)
+		// As a starting point, indicate that the query has completed.
+		// This will be refined below.
+		qm.phase = serverpb.ActiveQuery_COMPLETED
+
+		if hasResultErr := res != nil && res.Err() != nil; hasResultErr {
+			// The query has failed execution. We'll distinguish further cases below.
+			qm.phase = serverpb.ActiveQuery_FAILED
+
+			// Detect context cancelation and overwrite whatever error might have been
+			// set on the result before. The idea is that once the query's context is
+			// canceled, all sorts of actors can detect the cancelation and set all
+			// sorts of errors on the result. Rather than trying to impose discipline
+			// in that jungle, we just overwrite them all here with an error that's
+			// nicer to look at for the client.
+			if ctx.Err() != nil {
+				// Even in the cases where the error is a retryable error, we want to
+				// intercept the event and payload returned here to ensure that the query
+				// is not retried.
+				retEv = eventNonRetriableErr{
+					IsCommit: fsm.FromBool(isCommit(ast)),
+				}
+				res.SetError(cancelchecker.QueryCanceledError)
+				retPayload = eventNonRetriableErrPayload{err: cancelchecker.QueryCanceledError}
+				qm.phase = serverpb.ActiveQuery_CANCELED
+			}
+		}
 		cancelQuery()
-		if ex.executorType != executorTypeInternal {
+
+		if !isInternal {
 			ex.metrics.EngineMetrics.SQLActiveStatements.Dec(1)
 		}
 
@@ -372,16 +390,28 @@ func (ex *connExecutor) execStmtInOpenState(
 			}
 			res.SetError(sqlerrors.QueryTimeoutError)
 			retPayload = eventNonRetriableErrPayload{err: sqlerrors.QueryTimeoutError}
+			qm.phase = serverpb.ActiveQuery_TIMED_OUT
 		} else if txnTimedOut {
 			retEv = eventNonRetriableErr{
 				IsCommit: fsm.FromBool(isCommit(ast)),
 			}
 			res.SetError(sqlerrors.TxnTimeoutError)
 			retPayload = eventNonRetriableErrPayload{err: sqlerrors.TxnTimeoutError}
+			qm.phase = serverpb.ActiveQuery_TIMED_OUT
+		}
+
+		if !isInternal && !qm.hidden {
+			sd := ex.sessionDataStack.Base()
+
+			remoteStr := "<admin>"
+			if sd.RemoteAddr != nil {
+				remoteStr = sd.RemoteAddr.String()
+			}
+			ex.server.addToRecentStatementsCache(ex.Ctx(), ex.sessionID, ex.applicationName, sd.SessionUser().Normalized(), remoteStr, queryID, qm, timeutil.Now())
 		}
 	}(ctx, res)
 
-	if ex.executorType != executorTypeInternal {
+	if !isInternal {
 		ex.metrics.EngineMetrics.SQLActiveStatements.Inc(1)
 	}
 
@@ -712,7 +742,14 @@ func (ex *connExecutor) execStmtInOpenState(
 	p.stmt = stmt
 	p.cancelChecker.Reset(ctx)
 
-	p.autoCommit = canAutoCommit && !ex.server.cfg.TestingKnobs.DisableAutoCommitDuringExec
+	// Auto-commit is disallowed during statement execution, if we previously executed any DDL.
+	// This is because may potentially create jobs and do other operations rather than
+	// a KV commit. Insteadand carry out any extra operations needed for DDL.he auto-connection executor will commit after this statement,
+	// in this scenario.
+	// This prevents commit during statement execution, but the connection executor,
+	// will still commit this transaction after this statement executes.
+	p.autoCommit = canAutoCommit &&
+		!ex.server.cfg.TestingKnobs.DisableAutoCommitDuringExec && ex.extraTxnState.numDDL == 0
 	p.extendedEvalCtx.TxnIsSingleStmt = canAutoCommit && !ex.extraTxnState.firstStmtExecuted
 	ex.extraTxnState.firstStmtExecuted = true
 
@@ -1090,9 +1127,11 @@ func (ex *connExecutor) dispatchToExecutionEngine(
 	ex.sessionTracing.TracePlanStart(ctx, stmt.AST.StatementTag())
 	ex.statsCollector.PhaseTimes().SetSessionPhaseTime(sessionphase.PlannerStartLogicalPlan, timeutil.Now())
 
-	if server := ex.server.cfg.DistSQLSrv; server != nil {
-		// Begin measuring CPU usage for tenants. This is a no-op for non-tenants.
-		ex.cpuStatsCollector.StartCollection(ctx, server.TenantCostController)
+	if multitenant.TenantRUEstimateEnabled.Get(ex.server.cfg.SV()) {
+		if server := ex.server.cfg.DistSQLSrv; server != nil {
+			// Begin measuring CPU usage for tenants. This is a no-op for non-tenants.
+			ex.cpuStatsCollector.StartCollection(ctx, server.TenantCostController)
+		}
 	}
 
 	// If adminAuditLogging is enabled, we want to check for HasAdminRole
@@ -1174,7 +1213,7 @@ func (ex *connExecutor) dispatchToExecutionEngine(
 	ex.sessionTracing.TracePlanCheckEnd(ctx, nil, distributePlan.WillDistribute())
 
 	if ex.server.cfg.TestingKnobs.BeforeExecute != nil {
-		ex.server.cfg.TestingKnobs.BeforeExecute(ctx, stmt.String())
+		ex.server.cfg.TestingKnobs.BeforeExecute(ctx, stmt.String(), planner.Descriptors())
 	}
 
 	ex.statsCollector.PhaseTimes().SetSessionPhaseTime(sessionphase.PlannerStartExecStmt, timeutil.Now())
@@ -1187,7 +1226,7 @@ func (ex *connExecutor) dispatchToExecutionEngine(
 			return nil, errors.AssertionFailedf("query %d not in registry", stmt.QueryID)
 		}
 		queryMeta.planGist = planner.instrumentation.planGist.String()
-		queryMeta.phase = executing
+		queryMeta.phase = serverpb.ActiveQuery_EXECUTING
 		queryMeta.database = planner.CurrentDatabase()
 		// TODO(yuzefovich): introduce ternary PlanDistribution into queryMeta.
 		queryMeta.isDistributed = distributePlan.WillDistribute()
@@ -1325,7 +1364,7 @@ func populateQueryLevelStatsAndRegions(
 	} else {
 		// If this query is being run by a tenant, record the RUs consumed by CPU
 		// usage and network egress to the client.
-		if cfg.DistSQLSrv != nil {
+		if multitenant.TenantRUEstimateEnabled.Get(cfg.SV()) && cfg.DistSQLSrv != nil {
 			if costController := cfg.DistSQLSrv.TenantCostController; costController != nil {
 				if costCfg := costController.GetCostConfig(); costCfg != nil {
 					networkEgressRUEstimate := costCfg.PGWireEgressCost(topLevelStats.networkEgressEstimate)
@@ -1415,7 +1454,8 @@ func (ex *connExecutor) handleTxnRowsGuardrails(
 		SessionID: ex.sessionID.String(),
 		NumRows:   numRows,
 	}
-	if shouldErr && ex.executorType == executorTypeInternal {
+	isInternal := ex.executorType == executorTypeInternal || ex.planner.isInternalPlanner
+	if shouldErr && isInternal {
 		// Internal work should never err and always log if violating either
 		// limit.
 		shouldLog = true
@@ -1430,7 +1470,7 @@ func (ex *connExecutor) handleTxnRowsGuardrails(
 	if shouldLog {
 		commonSQLEventDetails := ex.planner.getCommonSQLEventDetails(defaultRedactionOptions)
 		var event logpb.EventPayload
-		if ex.executorType == executorTypeInternal {
+		if isInternal {
 			if isRead {
 				event = &eventpb.TxnRowsReadLimitInternal{
 					CommonSQLEventDetails:     commonSQLEventDetails,
@@ -1609,6 +1649,7 @@ func (ex *connExecutor) execWithDistSQLEngine(
 			ex.resetEvalCtx(&factoryEvalCtx, planner.txn, planner.ExtendedEvalContext().StmtTimestamp)
 			factoryEvalCtx.Placeholders = &planner.semaCtx.Placeholders
 			factoryEvalCtx.Annotations = &planner.semaCtx.Annotations
+			factoryEvalCtx.SessionID = planner.ExtendedEvalContext().SessionID
 			return &factoryEvalCtx
 		}
 	}
@@ -2004,27 +2045,52 @@ func (ex *connExecutor) runShowTransferState(
 func (ex *connExecutor) runShowCompletions(
 	ctx context.Context, n *tree.ShowCompletions, res RestrictedCommandResult,
 ) error {
-	res.SetColumns(ctx, colinfo.ResultColumns{{Name: "COMPLETIONS", Typ: types.String}})
-	offsetVal, ok := n.Offset.AsConstantInt()
-	if !ok {
-		return errors.Newf("invalid offset %v", n.Offset)
+	res.SetColumns(ctx, colinfo.ShowCompletionsColumns)
+	log.Warningf(ctx, "COMPLETION GENERATOR FOR: %+v", *n)
+	ie := ex.server.cfg.InternalExecutor
+	sd := ex.planner.SessionData()
+	override := sessiondata.InternalExecutorOverride{
+		SearchPath: &sd.SearchPath,
+		Database:   sd.Database,
+		User:       sd.User(),
 	}
-	offset, err := strconv.Atoi(offsetVal.String())
-	if err != nil {
-		return err
+	// If a txn is currently open, reuse it. If not,
+	// we will read in a fresh txn.
+	//
+	// TODO(janexing): better bind the internal executor with the txn.
+	var txn *kv.Txn
+	if _, ok := ex.machine.CurState().(stateOpen); ok {
+		txn = func() *kv.Txn {
+			ex.state.mu.RLock()
+			defer ex.state.mu.RUnlock()
+			return ex.state.mu.txn
+		}()
 	}
-	completions, err := delegate.RunShowCompletions(n.Statement.RawString(), offset)
+	queryIterFn := func(ctx context.Context, opName string, stmt string, args ...interface{}) (eval.InternalRows, error) {
+		return ie.QueryIteratorEx(ctx, opName, txn,
+			override,
+			stmt, args...)
+	}
+
+	completions, err := newCompletionsGenerator(queryIterFn, n)
 	if err != nil {
+		log.Warningf(ctx, "COMPLETION GENERATOR FAILED: %v", err)
 		return err
 	}
 
-	for _, completion := range completions {
-		err = res.AddRow(ctx, tree.Datums{tree.NewDString(completion)})
+	var hasNext bool
+	for hasNext, err = completions.Next(ctx); hasNext; hasNext, err = completions.Next(ctx) {
+		row := completions.Values()
+		err = res.AddRow(ctx, row)
 		if err != nil {
+			log.Warningf(ctx, "COMPLETION ADDROW FAILED: %v", err)
 			return err
 		}
 	}
-	return nil
+	if err != nil {
+		log.Warningf(ctx, "COMPLETION GENERATOR NEXT FAILED: %v", err)
+	}
+	return err
 }
 
 // showQueryStatsFns maps column names as requested by the SQL clients
@@ -2158,7 +2224,7 @@ func (ex *connExecutor) addActiveQuery(
 		start:         ex.phaseTimes.GetSessionPhaseTime(sessionphase.SessionQueryReceived),
 		stmt:          stmt,
 		placeholders:  placeholders,
-		phase:         preparing,
+		phase:         serverpb.ActiveQuery_PREPARING,
 		isDistributed: false,
 		isFullScan:    false,
 		cancelQuery:   cancelQuery,
@@ -2169,15 +2235,16 @@ func (ex *connExecutor) addActiveQuery(
 	ex.mu.ActiveQueries[queryID] = qm
 }
 
-func (ex *connExecutor) removeActiveQuery(queryID clusterunique.ID, ast tree.Statement) {
+func (ex *connExecutor) removeActiveQuery(queryID clusterunique.ID, ast tree.Statement) *queryMeta {
 	ex.mu.Lock()
 	defer ex.mu.Unlock()
-	_, ok := ex.mu.ActiveQueries[queryID]
+	qm, ok := ex.mu.ActiveQueries[queryID]
 	if !ok {
 		panic(errors.AssertionFailedf("query %d missing from ActiveQueries", queryID))
 	}
 	delete(ex.mu.ActiveQueries, queryID)
 	ex.mu.LastActiveQuery = ast
+	return qm
 }
 
 // handleAutoCommit commits the KV transaction if it hasn't been committed
@@ -2394,9 +2461,12 @@ func (ex *connExecutor) recordTransactionFinish(
 		SessionID:               ex.sessionID,
 		TransactionID:           ev.txnID,
 		TransactionTimeSec:      txnTime.Seconds(),
+		StartTime:               txnStart,
+		EndTime:                 txnEnd,
 		Committed:               ev.eventType == txnCommit,
 		ImplicitTxn:             implicit,
 		RetryCount:              int64(ex.state.mu.autoRetryCounter),
+		AutoRetryReason:         ex.state.mu.autoRetryReason,
 		StatementFingerprintIDs: ex.extraTxnState.transactionStatementFingerprintIDs,
 		ServiceLatency:          txnServiceLat,
 		RetryLatency:            txnRetryLat,
@@ -2409,6 +2479,7 @@ func (ex *connExecutor) recordTransactionFinish(
 		RowsWritten:             ex.extraTxnState.rowsWritten,
 		BytesRead:               ex.extraTxnState.bytesRead,
 		Priority:                ex.state.priority,
+		SessionData:             ex.sessionData(),
 	}
 
 	if ex.server.cfg.TestingKnobs.OnRecordTxnFinish != nil {

@@ -54,7 +54,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/metric"
 	"github.com/cockroachdb/cockroach/pkg/util/randutil"
 	"github.com/cockroachdb/cockroach/pkg/util/stop"
-	"github.com/cockroachdb/cockroach/pkg/util/tracing"
 	"github.com/cockroachdb/errors"
 	"github.com/stretchr/testify/require"
 )
@@ -194,10 +193,9 @@ func TestDistSQLReceiverUpdatesCaches(t *testing.T) {
 
 	size := func() int64 { return 2 << 10 }
 	st := cluster.MakeTestingClusterSettings()
-	tr := tracing.NewTracer()
 	stopper := stop.NewStopper()
 	defer stopper.Stop(ctx)
-	rangeCache := rangecache.NewRangeCache(st, nil /* db */, size, stopper, tr)
+	rangeCache := rangecache.NewRangeCache(st, nil /* db */, size, stopper)
 	r := MakeDistSQLReceiver(
 		ctx,
 		&errOnlyResultWriter{}, /* resultWriter */
@@ -420,14 +418,16 @@ func TestDistSQLDeadHosts(t *testing.T) {
 		))
 	}
 	r.CheckQueryResults(t,
-		"SELECT start_key, end_key, lease_holder, replicas FROM [SHOW RANGES FROM TABLE t]",
+		`SELECT IF(substring(start_key for 1)='…',start_key,NULL),
+            IF(substring(end_key for 1)='…',end_key,NULL),
+            lease_holder, replicas FROM [SHOW RANGES FROM TABLE t WITH DETAILS]`,
 		[][]string{
-			{"NULL", "/0", "1", "{1}"},
-			{"/0", "/20", "1", "{1,2,3}"},
-			{"/20", "/40", "2", "{2,3,4}"},
-			{"/40", "/60", "3", "{1,3,4}"},
-			{"/60", "/80", "4", "{1,2,4}"},
-			{"/80", "NULL", "5", "{2,3,5}"},
+			{"NULL", "…/1/0", "1", "{1}"},
+			{"…/1/0", "…/1/20", "1", "{1,2,3}"},
+			{"…/1/20", "…/1/40", "2", "{2,3,4}"},
+			{"…/1/40", "…/1/60", "3", "{1,3,4}"},
+			{"…/1/60", "…/1/80", "4", "{1,2,4}"},
+			{"…/1/80", "NULL", "5", "{2,3,5}"},
 		},
 	)
 

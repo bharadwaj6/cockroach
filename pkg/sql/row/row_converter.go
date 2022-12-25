@@ -30,6 +30,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
 	"github.com/cockroachdb/cockroach/pkg/util"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
+	"github.com/cockroachdb/cockroach/pkg/util/intsets"
 	"github.com/cockroachdb/errors"
 )
 
@@ -205,7 +206,7 @@ type DatumRowConverter struct {
 	// Tracks which column indices in the set of visible columns are part of the
 	// user specified target columns. This can be used before populating Datums
 	// to filter out unwanted column data.
-	TargetColOrds util.FastIntSet
+	TargetColOrds intsets.Fast
 
 	// The rest of these are derived from tableDesc, just cached here.
 	ri                        Inserter
@@ -251,15 +252,15 @@ func (c *DatumRowConverter) getSequenceAnnotation(
 	ctx context.Context, evalCtx *eval.Context, cols []catalog.Column,
 ) (map[string]*SequenceMetadata, map[descpb.ID]*SequenceMetadata, error) {
 	// Identify the sequences used in all the columns.
-	sequenceIDs := make(map[descpb.ID]struct{})
+	var sequenceIDs catalog.DescriptorIDSet
 	for _, col := range cols {
 		for i := 0; i < col.NumUsesSequences(); i++ {
 			id := col.GetUsesSequenceID(i)
-			sequenceIDs[id] = struct{}{}
+			sequenceIDs.Add(id)
 		}
 	}
 
-	if len(sequenceIDs) == 0 {
+	if sequenceIDs.Empty() {
 		return nil, nil, nil
 	}
 
@@ -276,8 +277,17 @@ func (c *DatumRowConverter) getSequenceAnnotation(
 		if err := txn.SetFixedTimestamp(ctx, hlc.Timestamp{WallTime: evalCtx.TxnTimestamp.UnixNano()}); err != nil {
 			return err
 		}
-		for seqID := range sequenceIDs {
-			seqDesc, err := descsCol.Direct().MustGetTableDescByID(ctx, txn, seqID)
+		flags := tree.CommonLookupFlags{
+			AvoidLeased:    true,
+			IncludeOffline: true,
+			IncludeDropped: true,
+		}
+		seqs, err := descsCol.GetImmutableDescriptorsByID(ctx, txn, flags, sequenceIDs.Ordered()...)
+		if err != nil {
+			return err
+		}
+		for _, desc := range seqs {
+			seqDesc, err := catalog.AsTableDescriptor(desc)
 			if err != nil {
 				return err
 			}
@@ -286,7 +296,7 @@ func (c *DatumRowConverter) getSequenceAnnotation(
 			}
 			seqMetadata := &SequenceMetadata{SeqDesc: seqDesc}
 			seqNameToMetadata[seqDesc.GetName()] = seqMetadata
-			seqIDToMetadata[seqID] = seqMetadata
+			seqIDToMetadata[seqDesc.GetID()] = seqMetadata
 		}
 		return nil
 	})

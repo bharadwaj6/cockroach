@@ -247,13 +247,10 @@ func TestStreamConnectionTimeout(t *testing.T) {
 	})
 
 	// Create a dummy server stream to pass to ConnectInboundStream.
-	serverStream, _ /* clientStream */, cleanup, err := createDummyStream()
-	if err != nil {
-		t.Fatal(err)
-	}
+	serverStream, _ /* clientStream */, cleanup := createDummyStream(t)
 	defer cleanup()
 
-	_, _, _, err = reg.ConnectInboundStream(context.Background(), id1, streamID1, serverStream, jiffy)
+	_, _, _, err := reg.ConnectInboundStream(context.Background(), id1, streamID1, serverStream, jiffy)
 	if !testutils.IsError(err, "came too late") {
 		t.Fatalf("expected %q, got: %v", "came too late", err)
 	}
@@ -295,10 +292,7 @@ func TestHandshake(t *testing.T) {
 			flowID := execinfrapb.FlowID{UUID: uuid.MakeV4()}
 			streamID := execinfrapb.StreamID(1)
 
-			serverStream, clientStream, cleanup, err := createDummyStream()
-			if err != nil {
-				t.Fatal(err)
-			}
+			serverStream, clientStream, cleanup := createDummyStream(t)
 			defer cleanup()
 
 			connectProducer := func() {
@@ -393,7 +387,7 @@ func TestFlowRegistryDrain(t *testing.T) {
 		registerFlow(t, id)
 		drainDone := make(chan struct{})
 		go func() {
-			reg.Drain(math.MaxInt64 /* flowDrainWait */, 0 /* minFlowDrainWait */, nil /* reporter */, false /* cancelStillRunning */)
+			reg.Drain(math.MaxInt64 /* flowDrainWait */, 0 /* minFlowDrainWait */, nil /* reporter */)
 			drainDone <- struct{}{}
 		}()
 		// Be relatively sure that the FlowRegistry is draining.
@@ -406,7 +400,7 @@ func TestFlowRegistryDrain(t *testing.T) {
 	// DrainTimeout verifies that Drain returns once the timeout expires.
 	t.Run("DrainTimeout", func(t *testing.T) {
 		registerFlow(t, id)
-		reg.Drain(0 /* flowDrainWait */, 0 /* minFlowDrainWait */, nil /* reporter */, false /* cancelStillRunning */)
+		reg.Drain(0 /* flowDrainWait */, 0 /* minFlowDrainWait */, nil /* reporter */)
 		reg.UnregisterFlow(id)
 		reg.Undrain()
 	})
@@ -417,7 +411,7 @@ func TestFlowRegistryDrain(t *testing.T) {
 		registerFlow(t, id)
 		drainDone := make(chan struct{})
 		go func() {
-			reg.Drain(math.MaxInt64 /* flowDrainWait */, 0 /* minFlowDrainWait */, nil /* reporter */, false /* cancelStillRunning */)
+			reg.Drain(math.MaxInt64 /* flowDrainWait */, 0 /* minFlowDrainWait */, nil /* reporter */)
 			drainDone <- struct{}{}
 		}()
 		// Be relatively sure that the FlowRegistry is draining.
@@ -460,7 +454,7 @@ func TestFlowRegistryDrain(t *testing.T) {
 		}
 		defer func() { reg.testingRunBeforeDrainSleep = nil }()
 		go func() {
-			reg.Drain(math.MaxInt64 /* flowDrainWait */, 0 /* minFlowDrainWait */, nil /* reporter */, false /* cancelStillRunning */)
+			reg.Drain(math.MaxInt64 /* flowDrainWait */, 0 /* minFlowDrainWait */, nil /* reporter */)
 			drainDone <- struct{}{}
 		}()
 		if err := <-errChan; err != nil {
@@ -488,7 +482,7 @@ func TestFlowRegistryDrain(t *testing.T) {
 		minFlowDrainWait := 10 * time.Millisecond
 		start := timeutil.Now()
 		go func() {
-			reg.Drain(math.MaxInt64 /* flowDrainWait */, minFlowDrainWait, nil /* reporter */, false /* cancelStillRunning */)
+			reg.Drain(math.MaxInt64 /* flowDrainWait */, minFlowDrainWait, nil /* reporter */)
 			drainDone <- struct{}{}
 		}()
 		// Be relatively sure that the FlowRegistry is draining.

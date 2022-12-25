@@ -14,6 +14,7 @@ import (
 	"context"
 	"fmt"
 
+	_ "github.com/cockroachdb/cockroach/pkg/kv/kvnemesis/kvnemesisutil" // see RequestHeader
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/concurrency/lock"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/humanizeutil"
@@ -1360,7 +1361,7 @@ func (gcr *GCRequest) flags() flag {
 	flags := isWrite | isRange | bypassesReplicaCircuitBreaker
 	// For clear range requests that GC entire range we don't want to batch with
 	// anything else.
-	if gcr.ClearRangeKey != nil {
+	if gcr.ClearRange != nil {
 		flags |= isAlone
 	}
 	return flags

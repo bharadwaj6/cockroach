@@ -16,7 +16,6 @@ import (
 	"time"
 
 	"github.com/cockroachdb/cockroach/pkg/clusterversion"
-	"github.com/cockroachdb/cockroach/pkg/security/username"
 	"github.com/cockroachdb/cockroach/pkg/server/serverpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/sessiondata"
@@ -139,15 +138,13 @@ func (s *statusServer) StatementDiagnosticsRequests(
 
 	// TODO(irfansharif): Remove this version gating in 23.1.
 	var extraColumns string
-	if s.admin.server.st.Version.IsActive(ctx, clusterversion.V22_2SampledStmtDiagReqs) {
+	if s.st.Version.IsActive(ctx, clusterversion.V22_2SampledStmtDiagReqs) {
 		extraColumns = `,
 			sampling_probability`
 	}
 	// TODO(davidh): Add pagination to this request.
 	it, err := s.internalExecutor.QueryIteratorEx(ctx, "stmt-diag-get-all", nil, /* txn */
-		sessiondata.InternalExecutorOverride{
-			User: username.RootUserName(),
-		},
+		sessiondata.RootUserSessionDataOverride,
 		fmt.Sprintf(`SELECT
 			id,
 			statement_fingerprint,
@@ -233,9 +230,7 @@ func (s *statusServer) StatementDiagnostics(
 
 	var err error
 	row, err := s.internalExecutor.QueryRowEx(ctx, "stmt-diag-get-one", nil, /* txn */
-		sessiondata.InternalExecutorOverride{
-			User: username.RootUserName(),
-		},
+		sessiondata.RootUserSessionDataOverride,
 		`SELECT
 			id,
 			statement_fingerprint,

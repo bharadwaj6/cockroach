@@ -15,12 +15,14 @@ import (
 
 	"github.com/cockroachdb/cockroach/pkg/geo/geoindex"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catenumpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/schemachanger/scerrors"
 	"github.com/cockroachdb/cockroach/pkg/sql/schemachanger/scpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/catconstants"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/catid"
+	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/util/iterutil"
 	"github.com/cockroachdb/cockroach/pkg/util/protoutil"
 	"github.com/cockroachdb/errors"
@@ -189,6 +191,9 @@ func (w *walkCtx) walkType(typ catalog.TypeDescriptor) {
 				LogicalRepresentation:  typ.GetMemberLogicalRepresentation(ord),
 			})
 		}
+	case descpb.TypeDescriptor_COMPOSITE:
+		name := tree.Name(typ.GetName())
+		panic(scerrors.NotImplementedErrorf(&name, "composite types not supported in new schema changer"))
 	default:
 		panic(errors.AssertionFailedf("unsupported type kind %q", typ.GetKind()))
 	}
@@ -527,7 +532,7 @@ func (w *walkCtx) walkIndex(tbl catalog.TableDescriptor, idx catalog.Index) {
 			index.Sharding = &cpy.Sharded
 		}
 		idxStatus := maybeMutationStatus(idx)
-		if idx.GetEncodingType() == descpb.PrimaryIndexEncoding {
+		if idx.GetEncodingType() == catenumpb.PrimaryIndexEncoding {
 			w.ev(idxStatus, &scpb.PrimaryIndex{Index: index})
 		} else {
 			sec := &scpb.SecondaryIndex{Index: index}
@@ -587,7 +592,7 @@ func (w *walkCtx) walkUniqueWithoutIndexConstraint(
 		ConstraintID: c.GetConstraintID(),
 		ColumnIDs:    c.CollectKeyColumnIDs().Ordered(),
 	})
-	w.ev(scpb.Status_PUBLIC, &scpb.ConstraintName{
+	w.ev(scpb.Status_PUBLIC, &scpb.ConstraintWithoutIndexName{
 		TableID:      tbl.GetID(),
 		ConstraintID: c.GetConstraintID(),
 		Name:         c.GetName(),
@@ -615,7 +620,7 @@ func (w *walkCtx) walkCheckConstraint(tbl catalog.TableDescriptor, c catalog.Che
 		Expression:            *expr,
 		FromHashShardedColumn: c.IsHashShardingConstraint(),
 	})
-	w.ev(scpb.Status_PUBLIC, &scpb.ConstraintName{
+	w.ev(scpb.Status_PUBLIC, &scpb.ConstraintWithoutIndexName{
 		TableID:      tbl.GetID(),
 		ConstraintID: c.GetConstraintID(),
 		Name:         c.GetName(),
@@ -640,7 +645,7 @@ func (w *walkCtx) walkForeignKeyConstraint(
 		ReferencedTableID:   c.GetReferencedTableID(),
 		ReferencedColumnIDs: c.ForeignKeyDesc().ReferencedColumnIDs,
 	})
-	w.ev(scpb.Status_PUBLIC, &scpb.ConstraintName{
+	w.ev(scpb.Status_PUBLIC, &scpb.ConstraintWithoutIndexName{
 		TableID:      tbl.GetID(),
 		ConstraintID: c.GetConstraintID(),
 		Name:         c.GetName(),

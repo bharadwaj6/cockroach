@@ -15,6 +15,7 @@ go_library(
         "constants.go",
         "count.go",
         "hash_aggregator.go",
+        "hash_group_joiner.go",
         "invariants_checker.go",
         "limit.go",
         "materializer.go",
@@ -45,8 +46,8 @@ go_library(
         "//pkg/roachpb",
         "//pkg/server/telemetry",  # keep
         "//pkg/settings",
+        "//pkg/sql/catalog/catenumpb",
         "//pkg/sql/catalog/colinfo",  # keep
-        "//pkg/sql/catalog/descpb",
         "//pkg/sql/colconv",
         "//pkg/sql/colexec/colexecagg",  # keep
         "//pkg/sql/colexec/colexecargs",
@@ -100,6 +101,7 @@ go_test(
         "external_hash_joiner_test.go",
         "external_sort_test.go",
         "hash_aggregator_test.go",
+        "hash_group_joiner_test.go",
         "hashjoiner_test.go",
         "if_expr_test.go",
         "inject_setup_test.go",

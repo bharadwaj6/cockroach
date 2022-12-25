@@ -32,6 +32,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/kv/kvclient/kvtenant"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/kvadmission"
+	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/kvstorage"
 	"github.com/cockroachdb/cockroach/pkg/multitenant"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/rpc"
@@ -845,7 +846,7 @@ func (dsm *diskStatsMap) initDiskStatsMap(specs []base.StoreSpec, engines []stor
 		diskNameToStoreID: make(map[string]roachpb.StoreID),
 	}
 	for i := range engines {
-		id, err := kvserver.ReadStoreIdent(context.Background(), engines[i])
+		id, err := kvstorage.ReadStoreIdent(context.Background(), engines[i])
 		if err != nil {
 			return err
 		}
@@ -1155,6 +1156,9 @@ func (n *Node) Batch(
 	tenantID, ok := roachpb.TenantFromContext(ctx)
 	if !ok {
 		tenantID = roachpb.SystemTenantID
+	} else {
+		// We had this tag before the ResetAndAnnotateCtx() call above.
+		ctx = logtags.AddTag(ctx, "tenant", tenantID.String())
 	}
 
 	// Requests from tenants don't have gateway node id set but are required for
@@ -1294,7 +1298,7 @@ func setupSpanForIncomingRPC(
 			tracing.WithServerSpanKind)
 	}
 
-	newSpan.SetLazyTag("request", ba)
+	newSpan.SetLazyTag("request", ba.ShallowCopy())
 	return ctx, spanForRequest{
 		needRecording: needRecordingCollection,
 		tenID:         tenID,

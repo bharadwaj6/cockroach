@@ -171,7 +171,7 @@ type SimpleMVCCIterator interface {
 	//
 	// The memory is invalidated on the next call to {Next,NextKey,Prev,SeekGE,SeekLT,Close}.
 	// Use Value() if that is undesirable.
-	UnsafeValue() []byte
+	UnsafeValue() ([]byte, error)
 	// MVCCValueLenAndIsTombstone should be called only for MVCC (i.e.,
 	// UnsafeKey().IsValue()) point values, when the actual point value is not
 	// needed, for example when updating stats and making GC decisions, and it
@@ -278,7 +278,7 @@ type MVCCIterator interface {
 	// this seems avoidable, and we should consider cleaning up the callers.
 	UnsafeRawMVCCKey() []byte
 	// Value is like UnsafeValue, but returns memory owned by the caller.
-	Value() []byte
+	Value() ([]byte, error)
 	// ValueProto unmarshals the value the iterator is currently
 	// pointing to using a protobuf decoder.
 	ValueProto(msg protoutil.Message) error
@@ -348,10 +348,10 @@ type EngineIterator interface {
 	// UnsafeValue returns the same value as Value, but the memory is
 	// invalidated on the next call to {Next,NextKey,Prev,SeekGE,SeekLT,Close}.
 	// REQUIRES: latest positioning function returned valid=true.
-	UnsafeValue() []byte
+	UnsafeValue() ([]byte, error)
 	// Value returns the current value as a byte slice.
 	// REQUIRES: latest positioning function returned valid=true.
-	Value() []byte
+	Value() ([]byte, error)
 	// GetRawIter is a low-level method only for use in the storage package,
 	// that returns the underlying pebble Iterator.
 	GetRawIter() *pebble.Iterator
@@ -1153,7 +1153,11 @@ func GetIntent(reader Reader, key roachpb.Key) (*roachpb.Intent, error) {
 		return nil, errors.AssertionFailedf("key does not match expected %v != %v", checkKey, key)
 	}
 	var meta enginepb.MVCCMetadata
-	if err = protoutil.Unmarshal(iter.UnsafeValue(), &meta); err != nil {
+	v, err := iter.UnsafeValue()
+	if err != nil {
+		return nil, err
+	}
+	if err = protoutil.Unmarshal(v, &meta); err != nil {
 		return nil, err
 	}
 	if meta.Txn == nil {
@@ -1236,11 +1240,15 @@ func ScanIntents(
 		if err != nil {
 			return nil, err
 		}
-		if err = protoutil.Unmarshal(iter.UnsafeValue(), &meta); err != nil {
+		v, err := iter.UnsafeValue()
+		if err != nil {
+			return nil, err
+		}
+		if err = protoutil.Unmarshal(v, &meta); err != nil {
 			return nil, err
 		}
 		intents = append(intents, roachpb.MakeIntent(meta.Txn, lockedKey))
-		intentBytes += int64(len(lockedKey)) + int64(len(iter.Value()))
+		intentBytes += int64(len(lockedKey)) + int64(len(v))
 	}
 	if err != nil {
 		return nil, err
@@ -1480,7 +1488,11 @@ func iterateOnReader(
 
 		var kv MVCCKeyValue
 		if hasPoint, _ := it.HasPointAndRange(); hasPoint {
-			kv = MVCCKeyValue{Key: it.Key(), Value: it.Value()}
+			v, err := it.Value()
+			if err != nil {
+				return err
+			}
+			kv = MVCCKeyValue{Key: it.Key(), Value: v}
 		}
 		if !it.RangeBounds().Key.Equal(rangeKeys.Bounds.Key) {
 			rangeKeys = it.RangeKeys().Clone()
@@ -1577,7 +1589,10 @@ func assertSimpleMVCCIteratorInvariants(iter SimpleMVCCIterator) error {
 		}
 	}
 	if hasPoint {
-		value := iter.UnsafeValue()
+		value, err := iter.UnsafeValue()
+		if err != nil {
+			return err
+		}
 		valueLen := iter.ValueLen()
 		if len(value) != valueLen {
 			return errors.AssertionFailedf("length of UnsafeValue %d != ValueLen %d", len(value), valueLen)
@@ -1660,7 +1675,15 @@ func assertMVCCIteratorInvariants(iter MVCCIterator) error {
 	}
 
 	// Value must equal UnsafeValue.
-	if v, u := iter.Value(), iter.UnsafeValue(); !bytes.Equal(v, u) {
+	u, err := iter.UnsafeValue()
+	if err != nil {
+		return err
+	}
+	v, err := iter.Value()
+	if err != nil {
+		return err
+	}
+	if !bytes.Equal(v, u) {
 		return errors.AssertionFailedf("Value %x does not match UnsafeValue %x at %s", v, u, key)
 	}
 
@@ -1677,21 +1700,31 @@ func assertMVCCIteratorInvariants(iter MVCCIterator) error {
 	return nil
 }
 
-// ScanConflictingIntents scans intents using only the separated intents lock
-// table. The result set is added to the given `intents` slice. It ignores
-// intents that do not conflict with `txn`. If it encounters intents that were
-// written by `txn` that are either at a higher sequence number than txn's or at
-// a lower sequence number but at a higher timestamp, `needIntentHistory` is set
-// to true. This flag is used to signal to the caller that a subsequent scan
-// over the MVCC key space (for the batch in question) will need to be performed
-// using an intent interleaving iterator in order to be able to read the correct
-// provisional value.
-func ScanConflictingIntents(
+// ScanConflictingIntentsForDroppingLatchesEarly scans intents using only the
+// separated intents lock table on behalf of a batch request trying to drop its
+// latches early. If found, conflicting intents are added to the supplied
+// `intents` slice, which indicates to the caller that evaluation should not
+// proceed until the intents are resolved. Intents that don't conflict with the
+// transaction referenced by txnID[1] at the supplied `ts` are ignored.
+//
+// The caller must supply the sequence number of the request on behalf of which
+// the intents are being scanned. This is used to determine if the caller needs
+// to consult intent history when performing a scan over the MVCC keyspace
+// (indicated by the `needIntentHistory` return parameter). Intent history is
+// required to read the correct provisional value when scanning if we encounter
+// an intent written by the `txn` at a higher sequence number than the one
+// supplied or at a higher timestamp than the `ts` supplied (regardless of the
+// sequence number of the intent).
+//
+// [1] The supplied txnID may be empty (uuid.Nil) if the request on behalf of
+// which the scan is being performed is non-transactional.
+func ScanConflictingIntentsForDroppingLatchesEarly(
 	ctx context.Context,
 	reader Reader,
-	txn *roachpb.Transaction,
+	txnID uuid.UUID,
 	ts hlc.Timestamp,
 	start, end roachpb.Key,
+	seq enginepb.TxnSeq,
 	intents *[]roachpb.Intent,
 	maxIntents int64,
 ) (needIntentHistory bool, err error) {
@@ -1718,22 +1751,28 @@ func ScanConflictingIntents(
 	var ok bool
 	for ok, err = iter.SeekEngineKeyGE(EngineKey{Key: ltStart}); ok; ok, err = iter.NextEngineKey() {
 		if maxIntents != 0 && int64(len(*intents)) >= maxIntents {
-			break
+			// Return early if we're done accumulating intents; make no claims about
+			// not needing intent history.
+			return true /* needsIntentHistory */, nil
 		}
-		if err = protoutil.Unmarshal(iter.UnsafeValue(), &meta); err != nil {
+		v, err := iter.UnsafeValue()
+		if err != nil {
+			return false, err
+		}
+		if err = protoutil.Unmarshal(v, &meta); err != nil {
 			return false, err
 		}
 		if meta.Txn == nil {
 			return false, errors.Errorf("intent without transaction")
 		}
-		ownIntent := txn != nil && txn.ID == meta.Txn.ID
+		ownIntent := txnID != uuid.Nil && txnID == meta.Txn.ID
 		if ownIntent {
 			// If we ran into one of our own intents, check whether the intent has a
 			// higher (or equal) sequence number or a higher (or equal) timestamp. If
 			// either of these conditions is true, a corresponding scan over the MVCC
 			// key space will need access to the key's intent history in order to read
 			// the correct provisional value. So we set `needIntentHistory` to true.
-			if txn.Sequence <= meta.Txn.Sequence || ts.LessEq(meta.Timestamp.ToTimestamp()) {
+			if seq <= meta.Txn.Sequence || ts.LessEq(meta.Timestamp.ToTimestamp()) {
 				needIntentHistory = true
 			}
 			continue

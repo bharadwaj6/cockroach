@@ -51,7 +51,8 @@ ALTER TABLE kv SPLIT AT VALUES ('foo')
 statement error pq: could not UNSPLIT AT \('foo'\): rpc error: code = Unauthenticated desc = request \[1 AdmUnsplit\] not permitted
 ALTER TABLE kv UNSPLIT AT VALUES ('foo')
 
-statement error operation is unsupported in multi-tenancy mode
+#UNSPLIT ALL succeeds because there is no split point at this time.
+statement ok
 ALTER TABLE kv UNSPLIT ALL
 
 statement error pq: rpc error: code = Unauthenticated desc = request \[1 AdmScatter\] not permitted
@@ -70,10 +71,10 @@ statement error operation is unsupported in multi-tenancy mode
 ALTER RANGE 1 RELOCATE LEASE TO 2
 
 statement error operation is unsupported in multi-tenancy mode
-ALTER RANGE RELOCATE LEASE TO 2 FOR SELECT range_id from crdb_internal.ranges where table_name = 'kv'
+ALTER RANGE RELOCATE LEASE TO 2 FOR SELECT range_id FROM [SHOW RANGES FROM TABLE kv]
 
 statement error operation is unsupported in multi-tenancy mode
 ALTER RANGE 1 RELOCATE FROM 1 TO 2
 
 statement error operation is unsupported in multi-tenancy mode
-ALTER RANGE RELOCATE FROM 1 TO 2 FOR SELECT range_id from crdb_internal.ranges where table_name = 'kv'
+ALTER RANGE RELOCATE FROM 1 TO 2 FOR SELECT range_id FROM [SHOW RANGES FROM TABLE kv]

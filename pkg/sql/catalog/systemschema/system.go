@@ -19,6 +19,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/keys"
 	"github.com/cockroachdb/cockroach/pkg/security/username"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catenumpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catprivilege"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/dbdesc"
@@ -115,9 +116,12 @@ CREATE TABLE system.tenants (
 	// roles such as root and admin.
 	RoleIDSequenceSchema = `
 CREATE SEQUENCE system.role_id_seq START 100 MINVALUE 100 MAXVALUE 2147483647;`
+
+	indexUsageComputeExpr = `(statistics->'statistics':::STRING)->'indexes':::STRING`
 )
 
 var tenantNameComputeExprStr = tenantNameComputeExpr
+var indexUsageComputeExprStr = indexUsageComputeExpr
 
 // These system tables are not part of the system config.
 const (
@@ -130,6 +134,16 @@ CREATE TABLE system.lease (
   "nodeID"   INT8,
   expiration TIMESTAMP,
   CONSTRAINT "primary" PRIMARY KEY ("descID", version, expiration, "nodeID")
+);`
+
+	MRLeaseTableSchema = `CREATE TABLE system.lease (
+  "descID"     INT8,
+  version      INT8,
+  "nodeID"     INT8,
+  expiration   TIMESTAMP,
+  crdb_region  BYTES NOT NULL,
+  CONSTRAINT   "primary" PRIMARY KEY (crdb_region, "descID", version, expiration, "nodeID"),
+  FAMILY       "primary" ("descID", version, "nodeID", expiration, crdb_region)
 );`
 
 	// system.eventlog contains notable events from the cluster.
@@ -197,6 +211,7 @@ CREATE TABLE system.jobs (
 	claim_instance_id INT8,
 	num_runs          INT8,
 	last_run          TIMESTAMP,
+	job_type              STRING,
 	CONSTRAINT "primary" PRIMARY KEY (id),
 	INDEX (status, created),
 	INDEX (created_by_type, created_by_id) STORING (status),
@@ -206,7 +221,8 @@ CREATE TABLE system.jobs (
     created
   ) STORING(last_run, num_runs, claim_instance_id)
     WHERE ` + JobsRunStatsIdxPredicate + `,
-	FAMILY fam_0_id_status_created_payload (id, status, created, payload, created_by_type, created_by_id),
+  INDEX jobs_job_type_idx (job_type),
+	FAMILY fam_0_id_status_created_payload (id, status, created, payload, created_by_type, created_by_id, job_type),
 	FAMILY progress (progress),
 	FAMILY claim (claim_session_id, claim_instance_id, num_runs, last_run)
 );`
@@ -255,8 +271,9 @@ CREATE TABLE system.table_statistics (
 	histogram            BYTES,
 	"avgSize"            INT8       NOT NULL DEFAULT 0,
 	"partialPredicate"   STRING,
+	"fullStatisticID"    INT8,
 	CONSTRAINT "primary" PRIMARY KEY ("tableID", "statisticID"),
-	FAMILY "fam_0_tableID_statisticID_name_columnIDs_createdAt_rowCount_distinctCount_nullCount_histogram" ("tableID", "statisticID", name, "columnIDs", "createdAt", "rowCount", "distinctCount", "nullCount", histogram, "avgSize", "partialPredicate")
+	FAMILY "fam_0_tableID_statisticID_name_columnIDs_createdAt_rowCount_distinctCount_nullCount_histogram" ("tableID", "statisticID", name, "columnIDs", "createdAt", "rowCount", "distinctCount", "nullCount", histogram, "avgSize", "partialPredicate", "fullStatisticID")
 );`
 
 	// locations are used to map a locality specified by a node to geographic
@@ -274,12 +291,17 @@ CREATE TABLE system.locations (
 	// role_members stores relationships between roles (role->role and role->user).
 	RoleMembersTableSchema = `
 CREATE TABLE system.role_members (
-  "role"   STRING NOT NULL,
-  "member" STRING NOT NULL,
-  "isAdmin"  BOOL NOT NULL,
+  "role"    STRING NOT NULL,
+  "member"  STRING NOT NULL,
+  "isAdmin" BOOL NOT NULL,
+  role_id   OID,
+  member_id OID,
   CONSTRAINT "primary" PRIMARY KEY ("role", "member"),
   INDEX ("role"),
-  INDEX ("member")
+  INDEX ("member"),
+  INDEX (role_id),
+  INDEX (member_id),
+  UNIQUE INDEX (role_id, member_id)
 );`
 
 	// comments stores comments(database, table, column...).
@@ -519,10 +541,12 @@ CREATE TABLE system.statement_statistics (
     ) STORED,
 
     index_recommendations STRING[] NOT NULL DEFAULT (array[]::STRING[]),
+    indexes_usage JSONB AS (` + indexUsageComputeExpr + `) VIRTUAL,
 
     CONSTRAINT "primary" PRIMARY KEY (aggregated_ts, fingerprint_id, transaction_fingerprint_id, plan_hash, app_name, node_id)
       USING HASH WITH (bucket_count=8),
     INDEX "fingerprint_stats_idx" (fingerprint_id, transaction_fingerprint_id),
+    INVERTED INDEX "indexes_usage_idx" (indexes_usage),
 		FAMILY "primary" (
 			crdb_internal_aggregated_ts_app_name_fingerprint_id_node_id_plan_hash_transaction_fingerprint_id_shard_8,
 			aggregated_ts,
@@ -664,7 +688,7 @@ CREATE TABLE system.sql_instances (
     addr         STRING,
     session_id   BYTES,
     locality     JSONB,
-	crdb_region  BYTES NOT NULL,
+    crdb_region  BYTES NOT NULL,
     CONSTRAINT "primary" PRIMARY KEY (crdb_region, id),
     FAMILY "primary" (crdb_region, id, addr, session_id, locality)
 )`
@@ -758,7 +782,7 @@ func pk(name string) descpb.IndexDescriptor {
 
 // Helpers used to make some of the descpb.TableDescriptor literals below more concise.
 var (
-	singleASC = []catpb.IndexColumn_Direction{catpb.IndexColumn_ASC}
+	singleASC = []catenumpb.IndexColumn_Direction{catenumpb.IndexColumn_ASC}
 	singleID1 = []descpb.ColumnID{1}
 
 	// The hash computation expression below is generated by running the CREATE
@@ -833,6 +857,7 @@ func systemTable(
 			tbl.NextFamilyID = fam.ID + 1
 		}
 	}
+	tbl.NextIndexID = tbl.PrimaryIndex.ID + 1
 	for i, idx := range indexes {
 		if tbl.NextIndexID <= idx.ID {
 			tbl.NextIndexID = idx.ID + 1
@@ -908,7 +933,7 @@ func MakeSystemTables() []SystemTable {
 		DescIDSequence,
 		RoleIDSequence,
 		TenantsTable,
-		LeaseTable,
+		LeaseTable(),
 		EventLogTable,
 		RangeEventTable,
 		UITable,
@@ -975,7 +1000,7 @@ var (
 				ID:                  catconstants.NamespaceTablePrimaryIndexID,
 				Unique:              true,
 				KeyColumnNames:      []string{"parentID", "parentSchemaID", "name"},
-				KeyColumnDirections: []catpb.IndexColumn_Direction{catpb.IndexColumn_ASC, catpb.IndexColumn_ASC, catpb.IndexColumn_ASC},
+				KeyColumnDirections: []catenumpb.IndexColumn_Direction{catenumpb.IndexColumn_ASC, catenumpb.IndexColumn_ASC, catenumpb.IndexColumn_ASC},
 				KeyColumnIDs:        []descpb.ColumnID{1, 2, 3},
 			},
 		))
@@ -1030,7 +1055,7 @@ var (
 				ID:                  2,
 				Unique:              true,
 				KeyColumnNames:      []string{"user_id"},
-				KeyColumnDirections: []catpb.IndexColumn_Direction{catpb.IndexColumn_ASC},
+				KeyColumnDirections: []catenumpb.IndexColumn_Direction{catenumpb.IndexColumn_ASC},
 				KeyColumnIDs:        []descpb.ColumnID{4},
 				KeySuffixColumnIDs:  []descpb.ColumnID{1},
 				Version:             descpb.StrictIndexColumnIDGuaranteesVersion,
@@ -1107,7 +1132,7 @@ var (
 				Name:                tabledesc.LegacyPrimaryKeyIndexName,
 				KeyColumnIDs:        []descpb.ColumnID{tabledesc.SequenceColumnID},
 				KeyColumnNames:      []string{tabledesc.SequenceColumnName},
-				KeyColumnDirections: []catpb.IndexColumn_Direction{catpb.IndexColumn_ASC},
+				KeyColumnDirections: []catenumpb.IndexColumn_Direction{catenumpb.IndexColumn_ASC},
 			},
 		),
 		func(tbl *descpb.TableDescriptor) {
@@ -1151,7 +1176,7 @@ var (
 				Name:                tabledesc.LegacyPrimaryKeyIndexName,
 				KeyColumnIDs:        []descpb.ColumnID{tabledesc.SequenceColumnID},
 				KeyColumnNames:      []string{tabledesc.SequenceColumnName},
-				KeyColumnDirections: []catpb.IndexColumn_Direction{catpb.IndexColumn_ASC},
+				KeyColumnDirections: []catenumpb.IndexColumn_Direction{catenumpb.IndexColumn_ASC},
 			},
 		),
 		func(tbl *descpb.TableDescriptor) {
@@ -1200,7 +1225,7 @@ var (
 				ID:                  2,
 				Unique:              true,
 				KeyColumnNames:      []string{"name"},
-				KeyColumnDirections: []catpb.IndexColumn_Direction{catpb.IndexColumn_ASC},
+				KeyColumnDirections: []catenumpb.IndexColumn_Direction{catenumpb.IndexColumn_ASC},
 				KeyColumnIDs:        []descpb.ColumnID{4},
 				KeySuffixColumnIDs:  []descpb.ColumnID{1},
 				Version:             descpb.StrictIndexColumnIDGuaranteesVersion,
@@ -1215,29 +1240,65 @@ var (
 // suggestions on writing and maintaining them.
 var (
 	// LeaseTable is the descriptor for the leases table.
-	LeaseTable = makeSystemTable(
-		LeaseTableSchema,
-		systemTable(
-			catconstants.LeaseTableName,
-			keys.LeaseTableID,
-			[]descpb.ColumnDescriptor{
-				{Name: "descID", ID: 1, Type: types.Int},
-				{Name: "version", ID: 2, Type: types.Int},
-				{Name: "nodeID", ID: 3, Type: types.Int},
-				{Name: "expiration", ID: 4, Type: types.Timestamp},
-			},
-			[]descpb.ColumnFamilyDescriptor{
-				{Name: "primary", ID: 0, ColumnNames: []string{"descID", "version", "nodeID", "expiration"}, ColumnIDs: []descpb.ColumnID{1, 2, 3, 4}},
-			},
-			descpb.IndexDescriptor{
-				Name:                "primary",
-				ID:                  1,
-				Unique:              true,
-				KeyColumnNames:      []string{"descID", "version", "expiration", "nodeID"},
-				KeyColumnDirections: []catpb.IndexColumn_Direction{catpb.IndexColumn_ASC, catpb.IndexColumn_ASC, catpb.IndexColumn_ASC, catpb.IndexColumn_ASC},
-				KeyColumnIDs:        []descpb.ColumnID{1, 2, 4, 3},
-			},
-		))
+	LeaseTable = func() SystemTable {
+		if TestSupportMultiRegion() {
+			return makeSystemTable(
+				MRLeaseTableSchema,
+				systemTable(
+					catconstants.LeaseTableName,
+					keys.LeaseTableID,
+					[]descpb.ColumnDescriptor{
+						{Name: "descID", ID: 1, Type: types.Int},
+						{Name: "version", ID: 2, Type: types.Int},
+						{Name: "nodeID", ID: 3, Type: types.Int},
+						{Name: "expiration", ID: 4, Type: types.Timestamp},
+						{Name: "crdb_region", ID: 5, Type: types.Bytes},
+					},
+					[]descpb.ColumnFamilyDescriptor{
+						{
+							Name:        "primary",
+							ID:          0,
+							ColumnNames: []string{"descID", "version", "nodeID", "expiration", "crdb_region"},
+							ColumnIDs:   []descpb.ColumnID{1, 2, 3, 4, 5},
+						},
+					},
+					descpb.IndexDescriptor{
+						Name:           "primary",
+						ID:             2,
+						Unique:         true,
+						KeyColumnNames: []string{"crdb_region", "descID", "version", "expiration", "nodeID"},
+						KeyColumnDirections: []catenumpb.IndexColumn_Direction{
+							catenumpb.IndexColumn_ASC, catenumpb.IndexColumn_ASC, catenumpb.IndexColumn_ASC,
+							catenumpb.IndexColumn_ASC, catenumpb.IndexColumn_ASC,
+						},
+						KeyColumnIDs: []descpb.ColumnID{5, 1, 2, 4, 3},
+					},
+				))
+		}
+		return makeSystemTable(
+			LeaseTableSchema,
+			systemTable(
+				catconstants.LeaseTableName,
+				keys.LeaseTableID,
+				[]descpb.ColumnDescriptor{
+					{Name: "descID", ID: 1, Type: types.Int},
+					{Name: "version", ID: 2, Type: types.Int},
+					{Name: "nodeID", ID: 3, Type: types.Int},
+					{Name: "expiration", ID: 4, Type: types.Timestamp},
+				},
+				[]descpb.ColumnFamilyDescriptor{
+					{Name: "primary", ID: 0, ColumnNames: []string{"descID", "version", "nodeID", "expiration"}, ColumnIDs: []descpb.ColumnID{1, 2, 3, 4}},
+				},
+				descpb.IndexDescriptor{
+					Name:                "primary",
+					ID:                  1,
+					Unique:              true,
+					KeyColumnNames:      []string{"descID", "version", "expiration", "nodeID"},
+					KeyColumnDirections: []catenumpb.IndexColumn_Direction{catenumpb.IndexColumn_ASC, catenumpb.IndexColumn_ASC, catenumpb.IndexColumn_ASC, catenumpb.IndexColumn_ASC},
+					KeyColumnIDs:        []descpb.ColumnID{1, 2, 4, 3},
+				},
+			))
+	}
 
 	uuidV4String = "uuid_v4()"
 
@@ -1270,7 +1331,7 @@ var (
 				ID:                  1,
 				Unique:              true,
 				KeyColumnNames:      []string{"timestamp", "uniqueID"},
-				KeyColumnDirections: []catpb.IndexColumn_Direction{catpb.IndexColumn_ASC, catpb.IndexColumn_ASC},
+				KeyColumnDirections: []catenumpb.IndexColumn_Direction{catenumpb.IndexColumn_ASC, catenumpb.IndexColumn_ASC},
 				KeyColumnIDs:        []descpb.ColumnID{1, 6},
 			},
 		))
@@ -1305,7 +1366,7 @@ var (
 				ID:                  1,
 				Unique:              true,
 				KeyColumnNames:      []string{"timestamp", "uniqueID"},
-				KeyColumnDirections: []catpb.IndexColumn_Direction{catpb.IndexColumn_ASC, catpb.IndexColumn_ASC},
+				KeyColumnDirections: []catenumpb.IndexColumn_Direction{catenumpb.IndexColumn_ASC, catenumpb.IndexColumn_ASC},
 				KeyColumnIDs:        []descpb.ColumnID{1, 7},
 			},
 		))
@@ -1349,16 +1410,17 @@ var (
 				{Name: "claim_instance_id", ID: 9, Type: types.Int, Nullable: true},
 				{Name: "num_runs", ID: 10, Type: types.Int, Nullable: true},
 				{Name: "last_run", ID: 11, Type: types.Timestamp, Nullable: true},
+				{Name: "job_type", ID: 12, Type: types.String, Nullable: true},
 			},
 			[]descpb.ColumnFamilyDescriptor{
 				{
-					// NB: We are using family name that existed prior to adding created_by_type and
-					// created_by_id columns.  This is done to minimize and simplify migration work
+					// NB: We are using family name that existed prior to adding created_by_type,
+					// created_by_id, and job_type columns. This is done to minimize and simplify migration work
 					// that needed to be done.
 					Name:        "fam_0_id_status_created_payload",
 					ID:          0,
-					ColumnNames: []string{"id", "status", "created", "payload", "created_by_type", "created_by_id"},
-					ColumnIDs:   []descpb.ColumnID{1, 2, 3, 4, 6, 7},
+					ColumnNames: []string{"id", "status", "created", "payload", "created_by_type", "created_by_id", "job_type"},
+					ColumnIDs:   []descpb.ColumnID{1, 2, 3, 4, 6, 7, 12},
 				},
 				{
 					Name:            "progress",
@@ -1380,7 +1442,7 @@ var (
 				ID:                  2,
 				Unique:              false,
 				KeyColumnNames:      []string{"status", "created"},
-				KeyColumnDirections: []catpb.IndexColumn_Direction{catpb.IndexColumn_ASC, catpb.IndexColumn_ASC},
+				KeyColumnDirections: []catenumpb.IndexColumn_Direction{catenumpb.IndexColumn_ASC, catenumpb.IndexColumn_ASC},
 				KeyColumnIDs:        []descpb.ColumnID{2, 3},
 				KeySuffixColumnIDs:  []descpb.ColumnID{1},
 				Version:             descpb.StrictIndexColumnIDGuaranteesVersion,
@@ -1390,7 +1452,7 @@ var (
 				ID:                  3,
 				Unique:              false,
 				KeyColumnNames:      []string{"created_by_type", "created_by_id"},
-				KeyColumnDirections: []catpb.IndexColumn_Direction{catpb.IndexColumn_ASC, catpb.IndexColumn_ASC},
+				KeyColumnDirections: []catenumpb.IndexColumn_Direction{catenumpb.IndexColumn_ASC, catenumpb.IndexColumn_ASC},
 				KeyColumnIDs:        []descpb.ColumnID{6, 7},
 				StoreColumnIDs:      []descpb.ColumnID{2},
 				StoreColumnNames:    []string{"status"},
@@ -1402,13 +1464,23 @@ var (
 				ID:                  4,
 				Unique:              false,
 				KeyColumnNames:      []string{"claim_session_id", "status", "created"},
-				KeyColumnDirections: []catpb.IndexColumn_Direction{catpb.IndexColumn_ASC, catpb.IndexColumn_ASC, catpb.IndexColumn_ASC},
+				KeyColumnDirections: []catenumpb.IndexColumn_Direction{catenumpb.IndexColumn_ASC, catenumpb.IndexColumn_ASC, catenumpb.IndexColumn_ASC},
 				KeyColumnIDs:        []descpb.ColumnID{8, 2, 3},
 				StoreColumnNames:    []string{"last_run", "num_runs", "claim_instance_id"},
 				StoreColumnIDs:      []descpb.ColumnID{11, 10, 9},
 				KeySuffixColumnIDs:  []descpb.ColumnID{1},
 				Version:             descpb.StrictIndexColumnIDGuaranteesVersion,
 				Predicate:           JobsRunStatsIdxPredicate,
+			},
+			descpb.IndexDescriptor{
+				Name:                "jobs_job_type_idx",
+				ID:                  5,
+				Unique:              false,
+				KeyColumnNames:      []string{"job_type"},
+				KeyColumnDirections: []catenumpb.IndexColumn_Direction{catenumpb.IndexColumn_ASC},
+				KeyColumnIDs:        []descpb.ColumnID{12},
+				KeySuffixColumnIDs:  []descpb.ColumnID{1},
+				Version:             descpb.StrictIndexColumnIDGuaranteesVersion,
 			},
 		))
 
@@ -1451,7 +1523,7 @@ var (
 				ID:                  2,
 				Unique:              false,
 				KeyColumnNames:      []string{"expiresAt"},
-				KeyColumnDirections: []catpb.IndexColumn_Direction{catpb.IndexColumn_ASC},
+				KeyColumnDirections: []catenumpb.IndexColumn_Direction{catenumpb.IndexColumn_ASC},
 				KeyColumnIDs:        []descpb.ColumnID{5},
 				KeySuffixColumnIDs:  []descpb.ColumnID{1},
 				Version:             descpb.StrictIndexColumnIDGuaranteesVersion,
@@ -1461,7 +1533,7 @@ var (
 				ID:                  3,
 				Unique:              false,
 				KeyColumnNames:      []string{"createdAt"},
-				KeyColumnDirections: []catpb.IndexColumn_Direction{catpb.IndexColumn_ASC},
+				KeyColumnDirections: []catenumpb.IndexColumn_Direction{catenumpb.IndexColumn_ASC},
 				KeyColumnIDs:        []descpb.ColumnID{4},
 				KeySuffixColumnIDs:  []descpb.ColumnID{1},
 				Version:             descpb.StrictIndexColumnIDGuaranteesVersion,
@@ -1471,7 +1543,7 @@ var (
 				ID:                  4,
 				Unique:              false,
 				KeyColumnNames:      []string{"revokedAt"},
-				KeyColumnDirections: []catpb.IndexColumn_Direction{catpb.IndexColumn_ASC},
+				KeyColumnDirections: []catenumpb.IndexColumn_Direction{catenumpb.IndexColumn_ASC},
 				KeyColumnIDs:        []descpb.ColumnID{6},
 				KeySuffixColumnIDs:  []descpb.ColumnID{1},
 				Version:             descpb.StrictIndexColumnIDGuaranteesVersion,
@@ -1481,7 +1553,7 @@ var (
 				ID:                  5,
 				Unique:              false,
 				KeyColumnNames:      []string{"lastUsedAt"},
-				KeyColumnDirections: []catpb.IndexColumn_Direction{catpb.IndexColumn_ASC},
+				KeyColumnDirections: []catenumpb.IndexColumn_Direction{catenumpb.IndexColumn_ASC},
 				KeyColumnIDs:        []descpb.ColumnID{7},
 				KeySuffixColumnIDs:  []descpb.ColumnID{1},
 				Version:             descpb.StrictIndexColumnIDGuaranteesVersion,
@@ -1506,6 +1578,7 @@ var (
 				{Name: "histogram", ID: 9, Type: types.Bytes, Nullable: true},
 				{Name: "avgSize", ID: 10, Type: types.Int, DefaultExpr: &zeroIntString},
 				{Name: "partialPredicate", ID: 11, Type: types.String, Nullable: true},
+				{Name: "fullStatisticID", ID: 12, Type: types.Int, Nullable: true},
 			},
 			[]descpb.ColumnFamilyDescriptor{
 				{
@@ -1523,8 +1596,9 @@ var (
 						"histogram",
 						"avgSize",
 						"partialPredicate",
+						"fullStatisticID",
 					},
-					ColumnIDs: []descpb.ColumnID{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11},
+					ColumnIDs: []descpb.ColumnID{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12},
 				},
 			},
 			descpb.IndexDescriptor{
@@ -1532,7 +1606,7 @@ var (
 				ID:                  1,
 				Unique:              true,
 				KeyColumnNames:      []string{"tableID", "statisticID"},
-				KeyColumnDirections: []catpb.IndexColumn_Direction{catpb.IndexColumn_ASC, catpb.IndexColumn_ASC},
+				KeyColumnDirections: []catenumpb.IndexColumn_Direction{catenumpb.IndexColumn_ASC, catenumpb.IndexColumn_ASC},
 				KeyColumnIDs:        []descpb.ColumnID{1, 2},
 			},
 		))
@@ -1564,7 +1638,7 @@ var (
 				ID:                  1,
 				Unique:              true,
 				KeyColumnNames:      []string{"localityKey", "localityValue"},
-				KeyColumnDirections: []catpb.IndexColumn_Direction{catpb.IndexColumn_ASC, catpb.IndexColumn_ASC},
+				KeyColumnDirections: []catenumpb.IndexColumn_Direction{catenumpb.IndexColumn_ASC, catenumpb.IndexColumn_ASC},
 				KeyColumnIDs:        []descpb.ColumnID{1, 2},
 			},
 		))
@@ -1579,6 +1653,8 @@ var (
 				{Name: "role", ID: 1, Type: types.String},
 				{Name: "member", ID: 2, Type: types.String},
 				{Name: "isAdmin", ID: 3, Type: types.Bool},
+				{Name: "role_id", ID: 4, Type: types.Oid, Nullable: true},
+				{Name: "member_id", ID: 5, Type: types.Oid, Nullable: true},
 			},
 			[]descpb.ColumnFamilyDescriptor{
 				{
@@ -1594,13 +1670,27 @@ var (
 					ColumnIDs:       []descpb.ColumnID{3},
 					DefaultColumnID: 3,
 				},
+				{
+					Name:            "fam_4_role_id",
+					ID:              4,
+					ColumnNames:     []string{"role_id"},
+					ColumnIDs:       []descpb.ColumnID{4},
+					DefaultColumnID: 4,
+				},
+				{
+					Name:            "fam_5_member_id",
+					ID:              5,
+					ColumnNames:     []string{"member_id"},
+					ColumnIDs:       []descpb.ColumnID{5},
+					DefaultColumnID: 5,
+				},
 			},
 			descpb.IndexDescriptor{
 				Name:                "primary",
 				ID:                  1,
 				Unique:              true,
 				KeyColumnNames:      []string{"role", "member"},
-				KeyColumnDirections: []catpb.IndexColumn_Direction{catpb.IndexColumn_ASC, catpb.IndexColumn_ASC},
+				KeyColumnDirections: []catenumpb.IndexColumn_Direction{catenumpb.IndexColumn_ASC, catenumpb.IndexColumn_ASC},
 				KeyColumnIDs:        []descpb.ColumnID{1, 2},
 			},
 			descpb.IndexDescriptor{
@@ -1608,7 +1698,7 @@ var (
 				ID:                  2,
 				Unique:              false,
 				KeyColumnNames:      []string{"role"},
-				KeyColumnDirections: []catpb.IndexColumn_Direction{catpb.IndexColumn_ASC},
+				KeyColumnDirections: []catenumpb.IndexColumn_Direction{catenumpb.IndexColumn_ASC},
 				KeyColumnIDs:        []descpb.ColumnID{1},
 				KeySuffixColumnIDs:  []descpb.ColumnID{2},
 				Version:             descpb.StrictIndexColumnIDGuaranteesVersion,
@@ -1618,9 +1708,39 @@ var (
 				ID:                  3,
 				Unique:              false,
 				KeyColumnNames:      []string{"member"},
-				KeyColumnDirections: []catpb.IndexColumn_Direction{catpb.IndexColumn_ASC},
+				KeyColumnDirections: []catenumpb.IndexColumn_Direction{catenumpb.IndexColumn_ASC},
 				KeyColumnIDs:        []descpb.ColumnID{2},
 				KeySuffixColumnIDs:  []descpb.ColumnID{1},
+				Version:             descpb.StrictIndexColumnIDGuaranteesVersion,
+			},
+			descpb.IndexDescriptor{
+				Name:                "role_members_role_id_idx",
+				ID:                  4,
+				Unique:              false,
+				KeyColumnNames:      []string{"role_id"},
+				KeyColumnDirections: []catenumpb.IndexColumn_Direction{catenumpb.IndexColumn_ASC},
+				KeyColumnIDs:        []descpb.ColumnID{4},
+				KeySuffixColumnIDs:  []descpb.ColumnID{1, 2},
+				Version:             descpb.StrictIndexColumnIDGuaranteesVersion,
+			},
+			descpb.IndexDescriptor{
+				Name:                "role_members_member_id_idx",
+				ID:                  5,
+				Unique:              false,
+				KeyColumnNames:      []string{"member_id"},
+				KeyColumnDirections: []catenumpb.IndexColumn_Direction{catenumpb.IndexColumn_ASC},
+				KeyColumnIDs:        []descpb.ColumnID{5},
+				KeySuffixColumnIDs:  []descpb.ColumnID{1, 2},
+				Version:             descpb.StrictIndexColumnIDGuaranteesVersion,
+			},
+			descpb.IndexDescriptor{
+				Name:                "role_members_role_id_member_id_key",
+				ID:                  6,
+				Unique:              true,
+				KeyColumnNames:      []string{"role_id", "member_id"},
+				KeyColumnDirections: []catenumpb.IndexColumn_Direction{catenumpb.IndexColumn_ASC, catenumpb.IndexColumn_ASC},
+				KeyColumnIDs:        []descpb.ColumnID{4, 5},
+				KeySuffixColumnIDs:  []descpb.ColumnID{1, 2},
 				Version:             descpb.StrictIndexColumnIDGuaranteesVersion,
 			},
 		))
@@ -1646,7 +1766,7 @@ var (
 				ID:                  keys.CommentsTablePrimaryKeyIndexID,
 				Unique:              true,
 				KeyColumnNames:      []string{"type", "object_id", "sub_id"},
-				KeyColumnDirections: []catpb.IndexColumn_Direction{catpb.IndexColumn_ASC, catpb.IndexColumn_ASC, catpb.IndexColumn_ASC},
+				KeyColumnDirections: []catenumpb.IndexColumn_Direction{catenumpb.IndexColumn_ASC, catenumpb.IndexColumn_ASC, catenumpb.IndexColumn_ASC},
 				KeyColumnIDs:        []descpb.ColumnID{1, 2, 3},
 			},
 		),
@@ -1685,8 +1805,8 @@ var (
 				ID:             1,
 				Unique:         true,
 				KeyColumnNames: []string{"id"},
-				KeyColumnDirections: []catpb.IndexColumn_Direction{
-					catpb.IndexColumn_ASC,
+				KeyColumnDirections: []catenumpb.IndexColumn_Direction{
+					catenumpb.IndexColumn_ASC,
 				},
 				KeyColumnIDs: []descpb.ColumnID{1},
 			},
@@ -1731,8 +1851,8 @@ var (
 				ID:             1,
 				Unique:         true,
 				KeyColumnNames: []string{"zone_id", "subzone_id", "type", "config"},
-				KeyColumnDirections: []catpb.IndexColumn_Direction{
-					catpb.IndexColumn_ASC, catpb.IndexColumn_ASC, catpb.IndexColumn_ASC, catpb.IndexColumn_ASC,
+				KeyColumnDirections: []catenumpb.IndexColumn_Direction{
+					catenumpb.IndexColumn_ASC, catenumpb.IndexColumn_ASC, catenumpb.IndexColumn_ASC, catenumpb.IndexColumn_ASC,
 				},
 				KeyColumnIDs: []descpb.ColumnID{1, 2, 3, 4},
 			},
@@ -1772,8 +1892,8 @@ var (
 				ID:             1,
 				Unique:         true,
 				KeyColumnNames: []string{"zone_id", "subzone_id", "locality"},
-				KeyColumnDirections: []catpb.IndexColumn_Direction{
-					catpb.IndexColumn_ASC, catpb.IndexColumn_ASC, catpb.IndexColumn_ASC,
+				KeyColumnDirections: []catenumpb.IndexColumn_Direction{
+					catenumpb.IndexColumn_ASC, catenumpb.IndexColumn_ASC, catenumpb.IndexColumn_ASC,
 				},
 				KeyColumnIDs: []descpb.ColumnID{1, 2, 3},
 			},
@@ -1818,7 +1938,7 @@ var (
 				ID:                  1,
 				Unique:              true,
 				KeyColumnNames:      []string{"zone_id", "subzone_id"},
-				KeyColumnDirections: []catpb.IndexColumn_Direction{catpb.IndexColumn_ASC, catpb.IndexColumn_ASC},
+				KeyColumnDirections: []catenumpb.IndexColumn_Direction{catenumpb.IndexColumn_ASC, catenumpb.IndexColumn_ASC},
 				KeyColumnIDs:        []descpb.ColumnID{1, 2},
 			},
 		))
@@ -1853,8 +1973,8 @@ var (
 				Unique:         true,
 				KeyColumnNames: []string{"singleton"},
 				KeyColumnIDs:   []descpb.ColumnID{1},
-				KeyColumnDirections: []catpb.IndexColumn_Direction{
-					catpb.IndexColumn_ASC,
+				KeyColumnDirections: []catenumpb.IndexColumn_Direction{
+					catenumpb.IndexColumn_ASC,
 				},
 			},
 		),
@@ -1898,8 +2018,8 @@ var (
 				Unique:         true,
 				KeyColumnNames: []string{"id"},
 				KeyColumnIDs:   []descpb.ColumnID{1},
-				KeyColumnDirections: []catpb.IndexColumn_Direction{
-					catpb.IndexColumn_ASC,
+				KeyColumnDirections: []catenumpb.IndexColumn_Direction{
+					catenumpb.IndexColumn_ASC,
 				},
 			},
 		))
@@ -1928,7 +2048,7 @@ var (
 				ID:                  1,
 				Unique:              true,
 				KeyColumnNames:      []string{"username", "option"},
-				KeyColumnDirections: []catpb.IndexColumn_Direction{catpb.IndexColumn_ASC, catpb.IndexColumn_ASC},
+				KeyColumnDirections: []catenumpb.IndexColumn_Direction{catenumpb.IndexColumn_ASC, catenumpb.IndexColumn_ASC},
 				KeyColumnIDs:        []descpb.ColumnID{1, 2},
 			},
 			descpb.IndexDescriptor{
@@ -1936,7 +2056,7 @@ var (
 				ID:                  2,
 				Unique:              false,
 				KeyColumnNames:      []string{"user_id"},
-				KeyColumnDirections: []catpb.IndexColumn_Direction{catpb.IndexColumn_ASC},
+				KeyColumnDirections: []catenumpb.IndexColumn_Direction{catenumpb.IndexColumn_ASC},
 				KeyColumnIDs:        []descpb.ColumnID{4},
 				Version:             descpb.StrictIndexColumnIDGuaranteesVersion,
 				KeySuffixColumnIDs:  []descpb.ColumnID{1, 2},
@@ -1996,7 +2116,7 @@ var (
 				KeyColumnNames:      []string{"completed", "id"},
 				StoreColumnNames:    []string{"statement_fingerprint", "min_execution_latency", "expires_at", "sampling_probability"},
 				KeyColumnIDs:        []descpb.ColumnID{2, 1},
-				KeyColumnDirections: []catpb.IndexColumn_Direction{catpb.IndexColumn_ASC, catpb.IndexColumn_ASC},
+				KeyColumnDirections: []catenumpb.IndexColumn_Direction{catenumpb.IndexColumn_ASC, catenumpb.IndexColumn_ASC},
 				StoreColumnIDs:      []descpb.ColumnID{3, 6, 7, 8},
 				Version:             descpb.StrictIndexColumnIDGuaranteesVersion,
 			},
@@ -2079,7 +2199,7 @@ var (
 				ID:                  2,
 				Unique:              false,
 				KeyColumnNames:      []string{"next_run"},
-				KeyColumnDirections: []catpb.IndexColumn_Direction{catpb.IndexColumn_ASC},
+				KeyColumnDirections: []catenumpb.IndexColumn_Direction{catenumpb.IndexColumn_ASC},
 				KeyColumnIDs:        []descpb.ColumnID{5},
 				KeySuffixColumnIDs:  []descpb.ColumnID{1},
 				Version:             descpb.StrictIndexColumnIDGuaranteesVersion,
@@ -2116,7 +2236,7 @@ var (
 						ID:                  2,
 						Unique:              true,
 						KeyColumnNames:      []string{"crdb_region", "session_uuid"},
-						KeyColumnDirections: []catpb.IndexColumn_Direction{catpb.IndexColumn_ASC, catpb.IndexColumn_ASC},
+						KeyColumnDirections: []catenumpb.IndexColumn_Direction{catenumpb.IndexColumn_ASC, catenumpb.IndexColumn_ASC},
 						KeyColumnIDs:        []descpb.ColumnID{4, 3},
 					},
 				))
@@ -2172,11 +2292,11 @@ var (
 				ID:             1,
 				Unique:         true,
 				KeyColumnNames: []string{"major", "minor", "patch", "internal"},
-				KeyColumnDirections: []catpb.IndexColumn_Direction{
-					catpb.IndexColumn_ASC,
-					catpb.IndexColumn_ASC,
-					catpb.IndexColumn_ASC,
-					catpb.IndexColumn_ASC,
+				KeyColumnDirections: []catenumpb.IndexColumn_Direction{
+					catenumpb.IndexColumn_ASC,
+					catenumpb.IndexColumn_ASC,
+					catenumpb.IndexColumn_ASC,
+					catenumpb.IndexColumn_ASC,
 				},
 				KeyColumnIDs: []descpb.ColumnID{1, 2, 3, 4},
 			},
@@ -2207,8 +2327,8 @@ var (
 				ID:             1,
 				Unique:         true,
 				KeyColumnNames: []string{"id"},
-				KeyColumnDirections: []catpb.IndexColumn_Direction{
-					catpb.IndexColumn_ASC,
+				KeyColumnDirections: []catenumpb.IndexColumn_Direction{
+					catenumpb.IndexColumn_ASC,
 				},
 				KeyColumnIDs: []descpb.ColumnID{1},
 			},
@@ -2243,6 +2363,7 @@ var (
 					Hidden:      true,
 				},
 				{Name: "index_recommendations", ID: 12, Type: types.StringArray, Nullable: false, DefaultExpr: &defaultIndexRec},
+				{Name: "indexes_usage", ID: 13, Type: types.Jsonb, Nullable: true, Virtual: true, ComputeExpr: &indexUsageComputeExprStr},
 			},
 			[]descpb.ColumnFamilyDescriptor{
 				{
@@ -2270,14 +2391,14 @@ var (
 					"app_name",
 					"node_id",
 				},
-				KeyColumnDirections: []catpb.IndexColumn_Direction{
-					catpb.IndexColumn_ASC,
-					catpb.IndexColumn_ASC,
-					catpb.IndexColumn_ASC,
-					catpb.IndexColumn_ASC,
-					catpb.IndexColumn_ASC,
-					catpb.IndexColumn_ASC,
-					catpb.IndexColumn_ASC,
+				KeyColumnDirections: []catenumpb.IndexColumn_Direction{
+					catenumpb.IndexColumn_ASC,
+					catenumpb.IndexColumn_ASC,
+					catenumpb.IndexColumn_ASC,
+					catenumpb.IndexColumn_ASC,
+					catenumpb.IndexColumn_ASC,
+					catenumpb.IndexColumn_ASC,
+					catenumpb.IndexColumn_ASC,
 				},
 				KeyColumnIDs: []descpb.ColumnID{11, 1, 2, 3, 4, 5, 6},
 				Version:      descpb.StrictIndexColumnIDGuaranteesVersion,
@@ -2303,13 +2424,29 @@ var (
 					"fingerprint_id",
 					"transaction_fingerprint_id",
 				},
-				KeyColumnDirections: []catpb.IndexColumn_Direction{
-					catpb.IndexColumn_ASC,
-					catpb.IndexColumn_ASC,
+				KeyColumnDirections: []catenumpb.IndexColumn_Direction{
+					catenumpb.IndexColumn_ASC,
+					catenumpb.IndexColumn_ASC,
 				},
 				KeyColumnIDs:       []descpb.ColumnID{2, 3},
 				KeySuffixColumnIDs: []descpb.ColumnID{11, 1, 4, 5, 6},
 				Version:            descpb.StrictIndexColumnIDGuaranteesVersion,
+			},
+			descpb.IndexDescriptor{
+				Name:   "indexes_usage_idx",
+				ID:     3,
+				Unique: false,
+				KeyColumnNames: []string{
+					"indexes_usage",
+				},
+				KeyColumnDirections: []catenumpb.IndexColumn_Direction{
+					catenumpb.IndexColumn_ASC,
+				},
+				KeyColumnIDs:        []descpb.ColumnID{13},
+				KeySuffixColumnIDs:  []descpb.ColumnID{11, 1, 2, 3, 4, 5, 6},
+				Version:             descpb.StrictIndexColumnIDGuaranteesVersion,
+				Type:                descpb.IndexDescriptor_INVERTED,
+				InvertedColumnKinds: []catpb.InvertedIndexColumnKind{catpb.InvertedIndexColumnKind_DEFAULT},
 			},
 		),
 		func(tbl *descpb.TableDescriptor) {
@@ -2372,12 +2509,12 @@ var (
 					"app_name",
 					"node_id",
 				},
-				KeyColumnDirections: []catpb.IndexColumn_Direction{
-					catpb.IndexColumn_ASC,
-					catpb.IndexColumn_ASC,
-					catpb.IndexColumn_ASC,
-					catpb.IndexColumn_ASC,
-					catpb.IndexColumn_ASC,
+				KeyColumnDirections: []catenumpb.IndexColumn_Direction{
+					catenumpb.IndexColumn_ASC,
+					catenumpb.IndexColumn_ASC,
+					catenumpb.IndexColumn_ASC,
+					catenumpb.IndexColumn_ASC,
+					catenumpb.IndexColumn_ASC,
 				},
 				KeyColumnIDs: []descpb.ColumnID{8, 1, 2, 3, 4},
 				Version:      descpb.StrictIndexColumnIDGuaranteesVersion,
@@ -2400,8 +2537,8 @@ var (
 				KeyColumnNames: []string{
 					"fingerprint_id",
 				},
-				KeyColumnDirections: []catpb.IndexColumn_Direction{
-					catpb.IndexColumn_ASC,
+				KeyColumnDirections: []catenumpb.IndexColumn_Direction{
+					catenumpb.IndexColumn_ASC,
 				},
 				KeyColumnIDs:       []descpb.ColumnID{2},
 				KeySuffixColumnIDs: []descpb.ColumnID{8, 1, 3, 4},
@@ -2450,8 +2587,8 @@ var (
 				ID:             1,
 				Unique:         true,
 				KeyColumnNames: []string{"database_id", "role_name"},
-				KeyColumnDirections: []catpb.IndexColumn_Direction{
-					catpb.IndexColumn_ASC, catpb.IndexColumn_ASC,
+				KeyColumnDirections: []catenumpb.IndexColumn_Direction{
+					catenumpb.IndexColumn_ASC, catenumpb.IndexColumn_ASC,
 				},
 				KeyColumnIDs: []descpb.ColumnID{1, 2},
 			},
@@ -2500,9 +2637,9 @@ var (
 				ID:             1,
 				Unique:         true,
 				KeyColumnNames: []string{"tenant_id", "instance_id"},
-				KeyColumnDirections: []catpb.IndexColumn_Direction{
-					catpb.IndexColumn_ASC,
-					catpb.IndexColumn_ASC,
+				KeyColumnDirections: []catenumpb.IndexColumn_Direction{
+					catenumpb.IndexColumn_ASC,
+					catenumpb.IndexColumn_ASC,
 				},
 				KeyColumnIDs: []descpb.ColumnID{1, 2},
 				Version:      descpb.StrictIndexColumnIDGuaranteesVersion,
@@ -2543,7 +2680,7 @@ var (
 						ID:                  2,
 						Unique:              true,
 						KeyColumnNames:      []string{"crdb_region", "id"},
-						KeyColumnDirections: []catpb.IndexColumn_Direction{catpb.IndexColumn_ASC, catpb.IndexColumn_ASC},
+						KeyColumnDirections: []catenumpb.IndexColumn_Direction{catenumpb.IndexColumn_ASC, catenumpb.IndexColumn_ASC},
 						KeyColumnIDs:        []descpb.ColumnID{5, 1},
 					},
 				))
@@ -2638,9 +2775,9 @@ var (
 				ID:             1,
 				Unique:         true,
 				KeyColumnNames: []string{"tenant_id", "name"},
-				KeyColumnDirections: []catpb.IndexColumn_Direction{
-					catpb.IndexColumn_ASC,
-					catpb.IndexColumn_ASC,
+				KeyColumnDirections: []catenumpb.IndexColumn_Direction{
+					catenumpb.IndexColumn_ASC,
+					catenumpb.IndexColumn_ASC,
 				},
 				KeyColumnIDs: []descpb.ColumnID{1, 2},
 				Version:      descpb.StrictIndexColumnIDGuaranteesVersion,
@@ -2701,7 +2838,7 @@ var (
 				ID:                  1,
 				Unique:              true,
 				KeyColumnNames:      []string{"username", "path"},
-				KeyColumnDirections: []catpb.IndexColumn_Direction{catpb.IndexColumn_ASC, catpb.IndexColumn_ASC},
+				KeyColumnDirections: []catenumpb.IndexColumn_Direction{catenumpb.IndexColumn_ASC, catenumpb.IndexColumn_ASC},
 				KeyColumnIDs:        []descpb.ColumnID{1, 2},
 			},
 		),
@@ -2764,7 +2901,7 @@ var (
 				ID:                  1,
 				Unique:              true,
 				KeyColumnNames:      []string{"job_id", "info_key", "written"},
-				KeyColumnDirections: []catpb.IndexColumn_Direction{catpb.IndexColumn_ASC, catpb.IndexColumn_ASC, catpb.IndexColumn_DESC},
+				KeyColumnDirections: []catenumpb.IndexColumn_Direction{catenumpb.IndexColumn_ASC, catenumpb.IndexColumn_ASC, catenumpb.IndexColumn_DESC},
 				KeyColumnIDs:        []descpb.ColumnID{1, 2, 3},
 			},
 		),

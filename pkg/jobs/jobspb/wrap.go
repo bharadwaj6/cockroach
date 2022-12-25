@@ -89,6 +89,11 @@ const ImportStatsName = "__import__"
 // ForecastStatsName is the name to use for statistic forecasts.
 const ForecastStatsName = "__forecast__"
 
+// MergedStatsName is the name to use for a statistic that is
+// a merged combination between a partial statistic and a full
+// table statistic.
+const MergedStatsName = "__merged__"
+
 // AutomaticJobTypes is a list of automatic job types that currently exist.
 var AutomaticJobTypes = [...]Type{
 	TypeAutoCreateStats,
@@ -139,6 +144,41 @@ func DetailsType(d isPayload_Details) Type {
 	default:
 		panic(errors.AssertionFailedf("Payload.Type called on a payload with an unknown details type: %T", d))
 	}
+}
+
+// ForEachType executes f for each job Type.
+func ForEachType(f func(typ Type), includeTypeUnspecified bool) {
+	start := TypeBackup
+	if includeTypeUnspecified {
+		start = TypeUnspecified
+	}
+	for typ := start; typ < NumJobTypes; typ++ {
+		f(typ)
+	}
+}
+
+// JobDetailsForEveryJobType is an array of Details keyed by every job type,
+// except for jobspb.TypeUnspecified.
+var JobDetailsForEveryJobType = map[Type]Details{
+	TypeBackup:       BackupDetails{},
+	TypeRestore:      RestoreDetails{},
+	TypeSchemaChange: SchemaChangeDetails{},
+	TypeImport:       ImportDetails{},
+	TypeChangefeed:   ChangefeedDetails{},
+	TypeCreateStats:  CreateStatsDetails{},
+	TypeAutoCreateStats: CreateStatsDetails{
+		Name: AutoStatsName,
+	},
+	TypeSchemaChangeGC:               SchemaChangeGCDetails{},
+	TypeTypeSchemaChange:             TypeSchemaChangeDetails{},
+	TypeStreamIngestion:              StreamIngestionDetails{},
+	TypeNewSchemaChange:              NewSchemaChangeDetails{},
+	TypeMigration:                    MigrationDetails{},
+	TypeAutoSpanConfigReconciliation: AutoSpanConfigReconciliationDetails{},
+	TypeAutoSQLStatsCompaction:       AutoSQLStatsCompactionDetails{},
+	TypeStreamReplication:            StreamReplicationDetails{},
+	TypeRowLevelTTL:                  RowLevelTTLDetails{},
+	TypeAutoSchemaTelemetry:          SchemaTelemetryDetails{},
 }
 
 // WrapProgressDetails wraps a ProgressDetails object in the protobuf wrapper
@@ -375,11 +415,30 @@ func (m *ChangefeedDetails) MarshalJSONPB(marshaller *jsonpb.Marshaler) ([]byte,
 // DescRewriteMap maps old descriptor IDs to new descriptor and parent IDs.
 type DescRewriteMap map[descpb.ID]*DescriptorRewrite
 
+// assertDetailsMap asserts that the entries in JobDetailsForEveryJobType are correct.
+func assertDetailsMap() {
+	if len(JobDetailsForEveryJobType) != NumJobTypes-1 {
+		panic("JobDetailsForEveryJobType does not have an entry for each Type")
+	}
+	ForEachType(
+		func(typ Type) {
+			payload := Payload{
+				Details: WrapPayloadDetails(JobDetailsForEveryJobType[typ]),
+			}
+			if typ != payload.Type() {
+				panic(fmt.Errorf("JobDetailsForEveryJobType has the incorrect entry for type %s", typ))
+			}
+		}, false,
+	)
+}
+
 func init() {
 	if len(Type_name) != NumJobTypes {
 		panic(fmt.Errorf("NumJobTypes (%d) does not match generated job type name map length (%d)",
 			NumJobTypes, len(Type_name)))
 	}
+
+	assertDetailsMap()
 
 	protoreflect.RegisterShorthands((*Progress)(nil), "progress")
 	protoreflect.RegisterShorthands((*Payload)(nil), "payload")

@@ -31,7 +31,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/sessiondata"
 	"github.com/cockroachdb/cockroach/pkg/sql/sqlutil"
-	"github.com/cockroachdb/cockroach/pkg/util"
+	"github.com/cockroachdb/cockroach/pkg/util/intsets"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/retry"
 	"github.com/cockroachdb/errors"
@@ -40,6 +40,8 @@ import (
 
 // validateCheckExpr verifies that the given CHECK expression returns true
 // for all the rows in the table.
+// `indexIDForValidation`, if non-zero, is used to explicit hint the
+// validation query to validate against a specific index.
 //
 // It operates entirely on the current goroutine and is thus able to
 // reuse an existing client.Txn safely.
@@ -51,6 +53,7 @@ func validateCheckExpr(
 	exprStr string,
 	tableDesc *tabledesc.Mutable,
 	ie sqlutil.InternalExecutor,
+	indexIDForValidation descpb.IndexID,
 ) error {
 	expr, err := schemaexpr.FormatExprForDisplay(ctx, tableDesc, exprStr, semaCtx, sessionData, tree.FmtParsable)
 	if err != nil {
@@ -59,14 +62,15 @@ func validateCheckExpr(
 	colSelectors := tabledesc.ColumnsSelectors(tableDesc.AccessibleColumns())
 	columns := tree.AsStringWithFlags(&colSelectors, tree.FmtSerializable)
 	queryStr := fmt.Sprintf(`SELECT %s FROM [%d AS t] WHERE NOT (%s) LIMIT 1`, columns, tableDesc.GetID(), exprStr)
+	if indexIDForValidation != 0 {
+		queryStr = fmt.Sprintf(`SELECT %s FROM [%d AS t]@[%d] WHERE NOT (%s) LIMIT 1`, columns, tableDesc.GetID(), indexIDForValidation, exprStr)
+	}
 	log.Infof(ctx, "validating check constraint %q with query %q", expr, queryStr)
 	rows, err := ie.QueryRowEx(
 		ctx,
 		"validate check constraint",
 		txn,
-		sessiondata.InternalExecutorOverride{
-			User: username.RootUserName(),
-		},
+		sessiondata.RootUserSessionDataOverride,
 		queryStr)
 	if err != nil {
 		return err
@@ -390,19 +394,19 @@ func (p *planner) RevalidateUniqueConstraintsInCurrentDB(ctx context.Context) er
 	if err != nil {
 		return err
 	}
-	tableDescs, err := p.Descriptors().GetAllTableDescriptorsInDatabase(ctx, p.Txn(), db)
+	inDB, err := p.Descriptors().GetAllTablesInDatabase(ctx, p.Txn(), db)
 	if err != nil {
 		return err
 	}
-
-	for _, tableDesc := range tableDescs {
-		if err = RevalidateUniqueConstraintsInTable(
-			ctx, p.Txn(), p.User(), p.ExecCfg().InternalExecutor, tableDesc,
-		); err != nil {
+	return inDB.ForEachDescriptor(func(desc catalog.Descriptor) error {
+		tableDesc, err := catalog.AsTableDescriptor(desc)
+		if err != nil {
 			return err
 		}
-	}
-	return nil
+		return RevalidateUniqueConstraintsInTable(
+			ctx, p.Txn(), p.User(), p.ExecCfg().InternalExecutor, tableDesc,
+		)
+	})
 }
 
 // RevalidateUniqueConstraintsInTable verifies that all unique constraints
@@ -680,17 +684,17 @@ func (p *planner) ValidateTTLScheduledJobsInCurrentDB(ctx context.Context) error
 	if err != nil {
 		return err
 	}
-	tableDescs, err := p.Descriptors().GetAllTableDescriptorsInDatabase(ctx, p.Txn(), db)
+	inDB, err := p.Descriptors().GetAllTablesInDatabase(ctx, p.Txn(), db)
 	if err != nil {
 		return err
 	}
-
-	for _, tableDesc := range tableDescs {
-		if err = p.validateTTLScheduledJobInTable(ctx, tableDesc); err != nil {
+	return inDB.ForEachDescriptor(func(desc catalog.Descriptor) error {
+		tableDesc, err := catalog.AsTableDescriptor(desc)
+		if err != nil {
 			return err
 		}
-	}
-	return nil
+		return p.validateTTLScheduledJobInTable(ctx, tableDesc)
+	})
 }
 
 var invalidTableTTLScheduledJobError = errors.Newf("invalid scheduled job for table")
@@ -813,7 +817,7 @@ func formatValues(colNames []string, values tree.Datums) string {
 // It is allowed to check only a subset of the active checks (the optimizer
 // could in principle determine that some checks can't fail because they
 // statically evaluate to true for the entire input).
-type checkSet = util.FastIntSet
+type checkSet = intsets.Fast
 
 // When executing mutations, we calculate a boolean column for each check
 // indicating if the check passed. This function verifies that each result is

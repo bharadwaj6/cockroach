@@ -82,13 +82,14 @@ func init() {
 		genDemoCmd := &cobra.Command{
 			Use:   meta.Name,
 			Short: meta.Description,
+			Long:  meta.Description + meta.Details,
 			Args:  cobra.ArbitraryArgs,
 			RunE: clierrorplus.MaybeDecorateError(func(cmd *cobra.Command, _ []string) error {
 				return runDemo(cmd, gen)
 			}),
 		}
-		if !meta.PublicFacing {
-			genDemoCmd.Hidden = true
+		if meta.TestInfraOnly {
+			demoCmd.Long = "THIS COMMAND WAS DEVELOPED FOR INTERNAL TESTING ONLY.\n\n" + demoCmd.Long
 		}
 		demoCmd.AddCommand(genDemoCmd)
 		genDemoCmd.Flags().AddFlagSet(genFlags)
@@ -115,13 +116,13 @@ func checkDemoConfiguration(
 	cmd *cobra.Command, gen workload.Generator,
 ) (workload.Generator, error) {
 	f := cliflagcfg.FlagSetForCmd(cmd)
-	if gen == nil && !demoCtx.NoExampleDatabase {
+	if gen == nil && !demoCtx.UseEmptyDatabase {
 		// Use a default dataset unless prevented by --no-example-database.
 		gen = defaultGenerator
 	}
 
 	// Make sure that the user didn't request a workload and an empty database.
-	if demoCtx.RunWorkload && demoCtx.NoExampleDatabase {
+	if demoCtx.RunWorkload && demoCtx.UseEmptyDatabase {
 		return nil, errors.New("cannot run a workload when generation of the example database is disabled")
 	}
 
@@ -151,7 +152,7 @@ func checkDemoConfiguration(
 		}
 
 		// Make sure that the user didn't request to have a topology and disable the example database.
-		if demoCtx.NoExampleDatabase {
+		if demoCtx.UseEmptyDatabase {
 			return nil, errors.New("cannot setup geo-partitioned replicas topology without generating an example database")
 		}
 
@@ -282,7 +283,7 @@ func runDemoInternal(
 
 		// Only print details about the telemetry configuration if the
 		// user has control over it.
-		if cluster.TelemetryOptOut() {
+		if cluster.TelemetryOptOut {
 			cliCtx.PrintlnUnlessEmbedded("#\n# Telemetry disabled by configuration.")
 		} else {
 			cliCtx.PrintlnUnlessEmbedded("#\n" +
@@ -356,6 +357,13 @@ func runDemoInternal(
 
 	if err := extraInit(ctx, conn); err != nil {
 		return err
+	}
+
+	// Report the PID of the process in a configured PID file. Used in tests.
+	if demoCtx.pidFile != "" {
+		if err := os.WriteFile(demoCtx.pidFile, []byte(fmt.Sprintf("%d\n", os.Getpid())), 0644); err != nil {
+			return err
+		}
 	}
 
 	// Enable the latency as late in the process of starting the cluster as we

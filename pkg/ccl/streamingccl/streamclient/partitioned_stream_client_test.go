@@ -20,8 +20,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/base"
 	_ "github.com/cockroachdb/cockroach/pkg/ccl/kvccl/kvtenantccl" // Ensure we can start tenant.
 	"github.com/cockroachdb/cockroach/pkg/ccl/streamingccl"
-	"github.com/cockroachdb/cockroach/pkg/ccl/streamingccl/streamingtest"
-	_ "github.com/cockroachdb/cockroach/pkg/ccl/streamingccl/streamproducer" // Ensure we can start replication stream.
+	"github.com/cockroachdb/cockroach/pkg/ccl/streamingccl/replicationtestutils"
 	"github.com/cockroachdb/cockroach/pkg/jobs"
 	"github.com/cockroachdb/cockroach/pkg/repstream/streampb"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
@@ -46,7 +45,7 @@ type subscriptionFeedSource struct {
 	sub Subscription
 }
 
-var _ streamingtest.FeedSource = (*subscriptionFeedSource)(nil)
+var _ replicationtestutils.FeedSource = (*subscriptionFeedSource)(nil)
 
 // Next implements the streamingtest.FeedSource interface.
 func (f *subscriptionFeedSource) Next() (streamingccl.Event, bool) {
@@ -66,7 +65,7 @@ func TestPartitionedStreamReplicationClient(t *testing.T) {
 	defer leaktest.AfterTest(t)()
 	defer log.Scope(t).Close(t)
 
-	h, cleanup := streamingtest.NewReplicationHelper(t,
+	h, cleanup := replicationtestutils.NewReplicationHelper(t,
 		base.TestServerArgs{
 			// Need to disable the test tenant until tenant-level restore is
 			// supported. Tracked with #76378.
@@ -128,8 +127,9 @@ INSERT INTO d.t2 VALUES (2);
 			[][]string{{string(status)}})
 	}
 
-	streamID, err := client.Create(ctx, testTenantName)
+	rps, err := client.Create(ctx, testTenantName)
 	require.NoError(t, err)
+	streamID := rps.StreamID
 	// We can create multiple replication streams for the same tenant.
 	_, err = client.Create(ctx, testTenantName)
 	require.NoError(t, err)
@@ -166,6 +166,8 @@ INSERT INTO d.t2 VALUES (2);
 	require.NoError(t, err)
 	require.Equal(t, streampb.StreamReplicationStatus_STREAM_INACTIVE, status.StreamStatus)
 
+	initialScanTimestamp := hlc.Timestamp{WallTime: timeutil.Now().UnixNano()}
+
 	// Testing client.Subscribe()
 	makePartitionSpec := func(tables ...string) *streampb.StreamPartitionSpec {
 		var spans []roachpb.Span
@@ -176,7 +178,8 @@ INSERT INTO d.t2 VALUES (2);
 		}
 
 		return &streampb.StreamPartitionSpec{
-			Spans: spans,
+			InitialScanTimestamp: initialScanTimestamp,
+			Spans:                spans,
 			Config: streampb.StreamPartitionSpec_ExecutionConfig{
 				MinCheckpointFrequency: 10 * time.Millisecond,
 			},
@@ -199,24 +202,25 @@ INSERT INTO d.t2 VALUES (2);
 		require.NoError(t, subClient.Close(ctx))
 	}()
 	require.NoError(t, err)
-	sub, err := subClient.Subscribe(ctx, streamID, encodeSpec("t1"), hlc.Timestamp{})
+	sub, err := subClient.Subscribe(ctx, streamID, encodeSpec("t1"),
+		initialScanTimestamp, hlc.Timestamp{})
 	require.NoError(t, err)
 
-	rf := streamingtest.MakeReplicationFeed(t, &subscriptionFeedSource{sub: sub})
+	rf := replicationtestutils.MakeReplicationFeed(t, &subscriptionFeedSource{sub: sub})
 	t1Descr := desctestutils.TestingGetPublicTableDescriptor(h.SysServer.DB(), tenant.Codec, "d", "t1")
 
 	ctxWithCancel, cancelFn := context.WithCancel(ctx)
 	cg := ctxgroup.WithContext(ctxWithCancel)
 	cg.GoCtx(sub.Subscribe)
 	// Observe the existing single row in t1.
-	expected := streamingtest.EncodeKV(t, tenant.Codec, t1Descr, 42)
+	expected := replicationtestutils.EncodeKV(t, tenant.Codec, t1Descr, 42)
 	firstObserved := rf.ObserveKey(ctx, expected.Key)
 	require.Equal(t, expected.Value.RawBytes, firstObserved.Value.RawBytes)
 	rf.ObserveResolved(ctx, firstObserved.Value.Timestamp)
 
 	// Updates the existing row.
 	tenant.SQL.Exec(t, `UPDATE d.t1 SET b = 'world' WHERE i = 42`)
-	expected = streamingtest.EncodeKV(t, tenant.Codec, t1Descr, 42, nil, "world")
+	expected = replicationtestutils.EncodeKV(t, tenant.Codec, t1Descr, 42, nil, "world")
 
 	// Observe its changes.
 	secondObserved := rf.ObserveKey(ctx, expected.Key)
@@ -244,8 +248,9 @@ INSERT INTO d.t2 VALUES (2);
 	h.SysSQL.Exec(t, `
 SET CLUSTER SETTING stream_replication.stream_liveness_track_frequency = '200ms';
 `)
-	streamID, err = client.Create(ctx, testTenantName)
+	rps, err = client.Create(ctx, testTenantName)
 	require.NoError(t, err)
+	streamID = rps.StreamID
 	require.NoError(t, client.Complete(ctx, streamID, true))
 	h.SysSQL.CheckQueryResultsRetry(t,
 		fmt.Sprintf("SELECT status FROM [SHOW JOBS] WHERE job_id = %d", streamID), [][]string{{"succeeded"}})

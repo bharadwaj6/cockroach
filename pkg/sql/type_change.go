@@ -37,7 +37,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/rowenc"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/sessiondata"
-	"github.com/cockroachdb/cockroach/pkg/util"
+	"github.com/cockroachdb/cockroach/pkg/util/intsets"
 	"github.com/cockroachdb/cockroach/pkg/util/iterutil"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/retry"
@@ -196,8 +196,19 @@ func (t *typeSchemaChanger) getTypeDescFromStore(
 	ctx context.Context,
 ) (catalog.TypeDescriptor, error) {
 	var typeDesc catalog.TypeDescriptor
-	if err := DescsTxn(ctx, t.execCfg, func(ctx context.Context, txn *kv.Txn, col *descs.Collection) (err error) {
-		typeDesc, err = col.Direct().MustGetTypeDescByID(ctx, txn, t.typeID)
+	if err := DescsTxn(ctx, t.execCfg, func(ctx context.Context, txn *kv.Txn, col *descs.Collection) error {
+		flags := tree.ObjectLookupFlags{CommonLookupFlags: tree.CommonLookupFlags{
+			AvoidLeased:    true,
+			IncludeDropped: true,
+			IncludeOffline: true,
+		}}
+		// Avoid GetImmutableTypeByID, downstream logic relies on
+		// catalog.ErrDescriptorNotFound.
+		desc, err := col.GetImmutableDescriptorByID(ctx, txn, t.typeID, flags.CommonLookupFlags)
+		if err != nil {
+			return err
+		}
+		typeDesc, err = catalog.AsTypeDescriptor(desc)
 		return err
 	}); err != nil {
 		return nil, err
@@ -995,7 +1006,7 @@ func findUsagesOfEnumValueInPartitioning(
 		return false, nil
 	}
 
-	var colsToCheck util.FastIntSet
+	var colsToCheck intsets.Fast
 	for i, c := range columns[:partitioning.NumColumns()] {
 		typT := c.GetType()
 		if !typT.UserDefined() {
@@ -1069,7 +1080,7 @@ func findUsageOfEnumValueInEncodedPartitioningValue(
 	partitioning catalog.Partitioning,
 	v []byte,
 	fakePrefixDatums []tree.Datum,
-	colsToCheck util.FastIntSet,
+	colsToCheck intsets.Fast,
 	foundUsage bool,
 	member *descpb.TypeDescriptor_EnumMember,
 ) (bool, error) {

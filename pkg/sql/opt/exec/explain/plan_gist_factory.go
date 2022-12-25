@@ -31,11 +31,12 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
 	"github.com/cockroachdb/cockroach/pkg/util"
 	"github.com/cockroachdb/cockroach/pkg/util/errorutil"
+	"github.com/cockroachdb/cockroach/pkg/util/intsets"
 	"github.com/cockroachdb/errors"
 )
 
 func init() {
-	if numOperators != 60 {
+	if numOperators != 61 {
 		// This error occurs when an operator has been added or removed in
 		// pkg/sql/opt/exec/explain/factory.opt. If an operator is added at the
 		// end of factory.opt, simply adjust the hardcoded value above. If an
@@ -369,7 +370,7 @@ func (f *PlanGistFactory) decodeBool() bool {
 	return val != 0
 }
 
-func (f *PlanGistFactory) encodeFastIntSet(s util.FastIntSet) {
+func (f *PlanGistFactory) encodeFastIntSet(s intsets.Fast) {
 	lenBefore := f.buffer.Len()
 	if err := s.Encode(&f.buffer); err != nil {
 		panic(err)
@@ -414,7 +415,7 @@ func (f *PlanGistFactory) encodeScanParams(params exec.ScanParams) {
 }
 
 func (f *PlanGistFactory) decodeScanParams() exec.ScanParams {
-	neededCols := util.FastIntSet{}
+	neededCols := intsets.Fast{}
 	err := neededCols.Decode(&f.buffer)
 	if err != nil {
 		panic(err)

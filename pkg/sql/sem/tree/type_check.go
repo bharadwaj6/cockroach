@@ -21,9 +21,9 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree/treecmp"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/volatility"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
-	"github.com/cockroachdb/cockroach/pkg/util"
 	"github.com/cockroachdb/cockroach/pkg/util/duration"
 	"github.com/cockroachdb/cockroach/pkg/util/errorutil/unimplemented"
+	"github.com/cockroachdb/cockroach/pkg/util/intsets"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil/pgdate"
 	"github.com/cockroachdb/errors"
 	"github.com/cockroachdb/redact"
@@ -1085,7 +1085,7 @@ func (expr *FuncExpr) TypeCheck(
 		return nil, pgerror.Wrapf(err, pgcode.InvalidParameterValue, "%s()", def.Name)
 	}
 
-	var calledOnNullInputFns, notCalledOnNullInputFns util.FastIntSet
+	var calledOnNullInputFns, notCalledOnNullInputFns intsets.Fast
 	for _, idx := range s.overloadIdxs {
 		if def.Overloads[idx].CalledOnNullInput {
 			calledOnNullInputFns.Add(int(idx))
@@ -1107,7 +1107,7 @@ func (expr *FuncExpr) TypeCheck(
 	if funcCls == AggregateClass {
 		for i := range s.typedExprs {
 			if s.typedExprs[i].ResolvedType().Family() == types.UnknownFamily {
-				var filtered util.FastIntSet
+				var filtered intsets.Fast
 				for j, ok := notCalledOnNullInputFns.Next(0); ok; j, ok = notCalledOnNullInputFns.Next(j + 1) {
 					if def.Overloads[j].params().GetAt(i).Equivalent(types.String) {
 						filtered.Add(j)
@@ -1696,10 +1696,19 @@ func (expr *Placeholder) TypeCheck(
 		return expr, err
 	} else if ok {
 		typ = typ.WithoutTypeModifiers()
-		if !desired.Equivalent(typ) {
-			// This indicates there's a conflict between what the type system thinks
-			// the type for this position should be, and the actual type of the
-			// placeholder. This actual placeholder type could be either a type hint
+		if !desired.Equivalent(typ) || (typ.IsAmbiguous() && !desired.IsAmbiguous()) {
+			// This indicates either:
+			// - There's a conflict between what the type system thinks
+			//   the type for this position should be, and the actual type of the
+			//   placeholder.
+			// - A type was already set for the placeholder, but it was ambiguous. If
+			//   the desired type is not ambiguous then it can be used as the
+			//   placeholder type. This can happen during overload type checking: an
+			//   overload that operates on collated strings might cause the type
+			//   checker to assign AnyCollatedString to a placeholder, but a later
+			//   stage of type checking can further refine the desired type.
+			//
+			// This actual placeholder type could be either a type hint
 			// (from pgwire or from a SQL PREPARE), or the actual value type.
 			//
 			// To resolve this situation, we *override* the placeholder type with what
@@ -2347,9 +2356,9 @@ type typeCheckExprsState struct {
 
 	exprs           []Expr
 	typedExprs      []TypedExpr
-	constIdxs       util.FastIntSet // index into exprs/typedExprs
-	placeholderIdxs util.FastIntSet // index into exprs/typedExprs
-	resolvableIdxs  util.FastIntSet // index into exprs/typedExprs
+	constIdxs       intsets.Fast // index into exprs/typedExprs
+	placeholderIdxs intsets.Fast // index into exprs/typedExprs
+	resolvableIdxs  intsets.Fast // index into exprs/typedExprs
 }
 
 // typeCheckSameTypedExprs type checks a list of expressions, asserting that all
@@ -2384,7 +2393,7 @@ func typeCheckSameTypedExprs(
 	// TODO(nvanbenschoten): Look into reducing allocations here.
 	typedExprs := make([]TypedExpr, len(exprs))
 
-	constIdxs, placeholderIdxs, resolvableIdxs := typeCheckSplitExprs(semaCtx, exprs)
+	constIdxs, placeholderIdxs, resolvableIdxs := typeCheckSplitExprs(exprs)
 
 	s := typeCheckExprsState{
 		ctx:             ctx,
@@ -2398,10 +2407,11 @@ func typeCheckSameTypedExprs(
 
 	switch {
 	case resolvableIdxs.Empty() && constIdxs.Empty():
-		if err := typeCheckSameTypedPlaceholders(s, desired); err != nil {
+		typ, err := typeCheckSameTypedPlaceholders(s, desired)
+		if err != nil {
 			return nil, nil, err
 		}
-		return typedExprs, desired, nil
+		return typedExprs, typ, nil
 	case resolvableIdxs.Empty():
 		return typeCheckConstsAndPlaceholdersWithDesired(s, desired)
 	default:
@@ -2426,9 +2436,11 @@ func typeCheckSameTypedExprs(
 			case !constIdxs.Empty():
 				return typeCheckConstsAndPlaceholdersWithDesired(s, desired)
 			case !placeholderIdxs.Empty():
-				next, _ := placeholderIdxs.Next(0)
-				p := s.exprs[next].(*Placeholder)
-				return nil, nil, placeholderTypeAmbiguityError(p.Idx)
+				typ, err := typeCheckSameTypedPlaceholders(s, desired)
+				if err != nil {
+					return nil, nil, err
+				}
+				return typedExprs, typ, nil
 			default:
 				if desired != types.Any {
 					return typedExprs, desired, nil
@@ -2455,7 +2467,7 @@ func typeCheckSameTypedExprs(
 			}
 		}
 		if !placeholderIdxs.Empty() {
-			if err := typeCheckSameTypedPlaceholders(s, firstValidType); err != nil {
+			if _, err := typeCheckSameTypedPlaceholders(s, firstValidType); err != nil {
 				return nil, nil, err
 			}
 		}
@@ -2464,15 +2476,16 @@ func typeCheckSameTypedExprs(
 }
 
 // Used to set placeholders to the desired typ.
-func typeCheckSameTypedPlaceholders(s typeCheckExprsState, typ *types.T) error {
+func typeCheckSameTypedPlaceholders(s typeCheckExprsState, typ *types.T) (*types.T, error) {
 	for i, ok := s.placeholderIdxs.Next(0); ok; i, ok = s.placeholderIdxs.Next(i + 1) {
 		typedExpr, err := typeCheckAndRequire(s.ctx, s.semaCtx, s.exprs[i], typ, "placeholder")
 		if err != nil {
-			return err
+			return nil, err
 		}
 		s.typedExprs[i] = typedExpr
+		typ = typedExpr.ResolvedType()
 	}
-	return nil
+	return typ, nil
 }
 
 // Used to type check constants to the same type. An optional typ can be
@@ -2542,17 +2555,32 @@ func typeCheckSameTypedConsts(
 	return nil, errors.AssertionFailedf("should throw error above")
 }
 
-// Used to type check all constants with the optional desired type. The
-// type that is chosen here will then be set to any placeholders.
+// Used to type check all constants with the optional desired type. First,
+// placeholders with type hints are checked, then constants are checked to
+// match the resulting type. The type that is chosen here will then be set
+// to any unresolved placeholders.
 func typeCheckConstsAndPlaceholdersWithDesired(
 	s typeCheckExprsState, desired *types.T,
 ) ([]TypedExpr, *types.T, error) {
+	if !s.placeholderIdxs.Empty() {
+		for i, ok := s.placeholderIdxs.Next(0); ok; i, ok = s.placeholderIdxs.Next(i + 1) {
+			if !s.semaCtx.isUnresolvedPlaceholder(s.exprs[i]) {
+				typedExpr, err := typeCheckAndRequire(s.ctx, s.semaCtx, s.exprs[i], desired, "placeholder")
+				if err != nil {
+					return nil, nil, err
+				}
+				s.typedExprs[i] = typedExpr
+				desired = typedExpr.ResolvedType()
+			}
+		}
+	}
 	typ, err := typeCheckSameTypedConsts(s, desired, false)
 	if err != nil {
 		return nil, nil, err
 	}
 	if !s.placeholderIdxs.Empty() {
-		if err := typeCheckSameTypedPlaceholders(s, typ); err != nil {
+		typ, err = typeCheckSameTypedPlaceholders(s, typ)
+		if err != nil {
 			return nil, nil, err
 		}
 	}
@@ -2564,13 +2592,13 @@ func typeCheckConstsAndPlaceholdersWithDesired(
 // - Placeholders
 // - All other Exprs
 func typeCheckSplitExprs(
-	semaCtx *SemaContext, exprs []Expr,
-) (constIdxs util.FastIntSet, placeholderIdxs util.FastIntSet, resolvableIdxs util.FastIntSet) {
+	exprs []Expr,
+) (constIdxs intsets.Fast, placeholderIdxs intsets.Fast, resolvableIdxs intsets.Fast) {
 	for i, expr := range exprs {
 		switch {
 		case isConstant(expr):
 			constIdxs.Add(i)
-		case semaCtx.isUnresolvedPlaceholder(expr):
+		case isPlaceholder(expr):
 			placeholderIdxs.Add(i)
 		default:
 			resolvableIdxs.Add(i)

@@ -16,6 +16,7 @@ import (
 
 	"github.com/cockroachdb/cockroach/pkg/ccl/backupccl"
 	"github.com/cockroachdb/cockroach/pkg/ccl/streamingccl"
+	"github.com/cockroachdb/cockroach/pkg/ccl/streamingccl/replicationutils"
 	"github.com/cockroachdb/cockroach/pkg/ccl/streamingccl/streamclient"
 	"github.com/cockroachdb/cockroach/pkg/jobs"
 	"github.com/cockroachdb/cockroach/pkg/jobs/jobspb"
@@ -228,7 +229,7 @@ func newStreamIngestionDataProcessor(
 		trackedSpans = append(trackedSpans, partitionSpec.Spans...)
 	}
 
-	frontier, err := span.MakeFrontierAt(spec.StartTime, trackedSpans...)
+	frontier, err := span.MakeFrontierAt(spec.PreviousHighWaterTimestamp, trackedSpans...)
 	if err != nil {
 		return nil, err
 	}
@@ -325,15 +326,16 @@ func (sip *streamIngestionProcessor) Start(ctx context.Context) {
 			sip.streamPartitionClients = append(sip.streamPartitionClients, streamClient)
 		}
 
-		startTime := frontierForSpans(sip.frontier, partitionSpec.Spans...)
+		previousHighWater := frontierForSpans(sip.frontier, partitionSpec.Spans...)
 
 		if streamingKnobs, ok := sip.FlowCtx.TestingKnobs().StreamingTestingKnobs.(*sql.StreamingTestingKnobs); ok {
 			if streamingKnobs != nil && streamingKnobs.BeforeClientSubscribe != nil {
-				streamingKnobs.BeforeClientSubscribe(addr, string(token), startTime)
+				streamingKnobs.BeforeClientSubscribe(addr, string(token), previousHighWater)
 			}
 		}
 
-		sub, err := streamClient.Subscribe(ctx, streampb.StreamID(sip.spec.StreamID), token, startTime)
+		sub, err := streamClient.Subscribe(ctx, streampb.StreamID(sip.spec.StreamID), token,
+			sip.spec.InitialScanTimestamp, previousHighWater)
 
 		if err != nil {
 			sip.MoveToDraining(errors.Wrapf(err, "consuming partition %v", addr))
@@ -605,7 +607,7 @@ func (sip *streamIngestionProcessor) bufferSST(sst *roachpb.RangeFeedSSTable) er
 
 	_, sp := tracing.ChildSpan(sip.Ctx(), "stream-ingestion-buffer-sst")
 	defer sp.Finish()
-	return streamingccl.ScanSST(sst, sst.Span,
+	return replicationutils.ScanSST(sst, sst.Span,
 		func(keyVal storage.MVCCKeyValue) error {
 			return sip.bufferKV(&roachpb.KeyValue{
 				Key: keyVal.Key.Key,

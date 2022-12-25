@@ -19,6 +19,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/col/typeconv"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
 	"github.com/cockroachdb/cockroach/pkg/util"
+	"github.com/cockroachdb/cockroach/pkg/util/intsets"
 	"github.com/cockroachdb/errors"
 )
 
@@ -47,6 +48,8 @@ type Batch interface {
 	// Selection, if not nil, returns the selection vector on this batch: a
 	// densely-packed list of the *increasing* indices in each column that have
 	// not been filtered out by a previous step.
+	// TODO(yuzefovich): consider ensuring that the length of the returned slice
+	// equals the length of the batch.
 	Selection() []int
 	// SetSelection sets whether this batch is using its selection vector or not.
 	SetSelection(bool)
@@ -207,7 +210,7 @@ type MemBatch struct {
 	// b is the slice of columns in this batch.
 	b []Vec
 	// datumVecIdxs stores the indices of all datum-backed vectors in b.
-	datumVecIdxs util.FastIntSet
+	datumVecIdxs intsets.Fast
 	useSel       bool
 	// sel is - if useSel is true - a selection vector from upstream. A
 	// selection vector is a list of selected tuple indices in this memBatch's

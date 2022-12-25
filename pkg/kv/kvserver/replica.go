@@ -39,6 +39,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/storage/enginepb"
 	"github.com/cockroachdb/cockroach/pkg/util"
 	"github.com/cockroachdb/cockroach/pkg/util/envutil"
+	"github.com/cockroachdb/cockroach/pkg/util/grunning"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/mon"
@@ -52,7 +53,7 @@ import (
 	"github.com/cockroachdb/errors"
 	"github.com/cockroachdb/redact"
 	"github.com/kr/pretty"
-	"go.etcd.io/etcd/raft/v3"
+	"go.etcd.io/raft/v3"
 )
 
 const (
@@ -1327,6 +1328,16 @@ func (r *Replica) assertStateRaftMuLockedReplicaMuRLocked(
 			log.Fatalf(ctx, "replica's replicaID %d diverges from descriptor %+v", r.replicaID, r.mu.state.Desc)
 		}
 	}
+	diskReplID, found, err := r.mu.stateLoader.LoadRaftReplicaID(ctx, reader)
+	if err != nil {
+		log.Fatalf(ctx, "%s", err)
+	}
+	if !found {
+		log.Fatalf(ctx, "no replicaID persisted")
+	}
+	if diskReplID.ReplicaID != r.replicaID {
+		log.Fatalf(ctx, "disk replicaID %d does not match in-mem %d", diskReplID, r.replicaID)
+	}
 }
 
 // TODO(nvanbenschoten): move the following 5 methods to replica_send.go.
@@ -2050,6 +2061,31 @@ func (r *Replica) GetApproximateDiskBytes(from, to roachpb.Key) (uint64, error) 
 
 func init() {
 	tracing.RegisterTagRemapping("r", "range")
+}
+
+// MeasureReqCPUNanos measures the cpu time spent on this replica processing
+// requests.
+func (r *Replica) MeasureReqCPUNanos(start time.Duration) {
+	r.measureNanosRunning(start, func(dur float64) {
+		r.loadStats.reqCPUNanos.RecordCount(dur, 0 /* nodeID */)
+	})
+}
+
+// MeasureRaftCPUNanos measures the cpu time spent on this replica processing
+// raft work.
+func (r *Replica) MeasureRaftCPUNanos(start time.Duration) {
+	r.measureNanosRunning(start, func(dur float64) {
+		r.loadStats.raftCPUNanos.RecordCount(dur, 0 /* nodeID */)
+	})
+}
+
+// measureNanosRunning measures the difference in cpu time from when this
+// method is called, to when the returned function is called. This difference
+// is recorded against the replica's cpu time attribution.
+func (r *Replica) measureNanosRunning(start time.Duration, f func(float64)) {
+	end := grunning.Time()
+	dur := grunning.Difference(start, end).Nanoseconds()
+	f(float64(dur))
 }
 
 // ReadProtectedTimestampsForTesting is for use only by tests to read and update

@@ -313,7 +313,7 @@ type Tracer struct {
 		// snapshots stores the activeSpansRegistry snapshots taken during the
 		// Tracer's lifetime. The ring buffer will contain snapshots with contiguous
 		// IDs, from the oldest one to <oldest id> + maxSnapshots - 1.
-		snapshots ring.Buffer // snapshotWithID
+		snapshots ring.Buffer[snapshotWithID]
 	}
 
 	testingMu               syncutil.Mutex // protects testingRecordAsyncSpans
@@ -382,6 +382,13 @@ type Tracer struct {
 type SpanRegistry struct {
 	mu struct {
 		syncutil.Mutex
+		// m stores all the currently open spans. Note that a span being present
+		// here proves that the corresponding Span.Finish() call has not yet
+		// completed (but crdbSpan.Finish() might have finished), therefor the span
+		// cannot be reused while present in the registry. At the same time, note
+		// that Span.Finish() can be called on these spans so, when using one of
+		// these spans, we need to be prepared for that use to be concurrent with
+		// the Finish() call.
 		m map[tracingpb.SpanID]*crdbSpan
 	}
 }
@@ -457,11 +464,11 @@ func (r *SpanRegistry) VisitRoots(visitor func(span RegistrySpan) error) error {
 	return nil
 }
 
-// visitTrace recursively calls the visitor on sp and all its descedents.
-func visitTrace(sp *Span, visitor func(sp RegistrySpan)) {
-	visitor(sp.i.crdb)
-	sp.visitOpenChildren(func(sp *Span) {
-		visitTrace(sp, visitor)
+// visitTrace recursively calls the visitor on sp and all its descendants.
+func visitTrace(sp *crdbSpan, visitor func(sp RegistrySpan)) {
+	visitor(sp)
+	sp.visitOpenChildren(func(child *crdbSpan) {
+		visitTrace(child, visitor)
 	})
 }
 
@@ -486,7 +493,7 @@ func (r *SpanRegistry) VisitSpans(visitor func(span RegistrySpan)) {
 	}()
 
 	for _, sp := range spans {
-		visitTrace(sp.Span, visitor)
+		visitTrace(sp.Span.i.crdb, visitor)
 	}
 }
 
@@ -960,7 +967,7 @@ type spanAllocHelper struct {
 	// Pre-allocated buffers for the span.
 	tagsAlloc             [3]attribute.KeyValue
 	childrenAlloc         [4]childRef
-	structuredEventsAlloc [3]interface{}
+	structuredEventsAlloc [3]*tracingpb.StructuredRecord
 	childrenMetadataAlloc map[string]tracingpb.OperationMetadata
 }
 
@@ -1032,7 +1039,7 @@ func (t *Tracer) releaseSpanToPool(sp *Span) {
 	h := sp.helper
 	h.tagsAlloc = [3]attribute.KeyValue{}
 	h.childrenAlloc = [4]childRef{}
-	h.structuredEventsAlloc = [3]interface{}{}
+	h.structuredEventsAlloc = [3]*tracingpb.StructuredRecord{}
 	for op := range h.childrenMetadataAlloc {
 		delete(h.childrenMetadataAlloc, op)
 	}
@@ -1089,14 +1096,17 @@ func (t *Tracer) startSpanGeneric(
 	}
 
 	if !opts.Parent.empty() {
-		// If we don't panic, opts.Parent will be moved into the child, and this
-		// release() will be a no-op.
-		defer opts.Parent.release()
+		if !opts.Parent.IsNoop() {
+			// If we don't panic, opts.Parent will be moved into the child, and this
+			// release() will be a no-op.
+			// Note that we can't call release() on a no-op span.
+			defer opts.Parent.release()
+		}
 
 		if !opts.RemoteParent.Empty() {
 			panic("can't specify both Parent and RemoteParent")
 		}
-		if opts.Parent.IsSterile() {
+		if opts.Parent.i.sterile {
 			// A sterile parent should have been optimized away by
 			// WithParent.
 			panic("invalid sterile parent")
@@ -1119,7 +1129,6 @@ child operation: %s, tracer created at:
 		}
 		if opts.Parent.IsNoop() {
 			// If the parent is a no-op, we'll create a root span.
-			opts.Parent.decRef()
 			opts.Parent = spanRef{}
 		}
 	}
@@ -1394,6 +1403,9 @@ func (t *Tracer) ExtractMetaFrom(carrier Carrier) (SpanMeta, error) {
 }
 
 // RegistrySpan is the interface used by clients of the active span registry.
+//
+// Note that RegistrySpans can be Finish()ed concurrently with their use, so all
+// methods must work with concurrent Finish() calls.
 type RegistrySpan interface {
 	// TraceID returns the id of the trace that this span is part of.
 	TraceID() tracingpb.TraceID

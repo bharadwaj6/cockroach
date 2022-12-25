@@ -17,6 +17,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/docs"
 	"github.com/cockroachdb/cockroach/pkg/geo/geoindex"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catenumpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/colinfo"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
@@ -205,13 +206,12 @@ func CreateIndex(b BuildCtx, n *tree.CreateIndex) {
 	// an implicit name if one is required.
 	indexName := string(n.Name)
 	if indexName == "" {
-		_, _, tbl := scpb.FindTable(relationElements)
 		numImplicitColumns := 0
 		if idxSpec.partitioning != nil {
 			numImplicitColumns = int(idxSpec.partitioning.NumImplicitColumns)
 		}
 		indexName = getImplicitSecondaryIndexName(b,
-			tbl,
+			screl.GetDescID(relation),
 			idxSpec.secondary.IndexID,
 			numImplicitColumns,
 		)
@@ -447,7 +447,7 @@ func maybeAddPartitionDescriptorForIndex(b BuildCtx, n *tree.CreateIndex, idxSpe
 				TableID:   fieldColumn.TableID,
 				ColumnID:  fieldColumn.ColumnID,
 				Kind:      scpb.IndexColumn_KEY,
-				Direction: catpb.IndexColumn_ASC,
+				Direction: catenumpb.IndexColumn_ASC,
 				Implicit:  true,
 			}
 			// Check if the column is already a suffix, then we should
@@ -552,9 +552,9 @@ func addColumnsForSecondaryIndex(
 			checkColumnAccessibilityForIndex(string(colName), colElts, false)
 		}
 		keyColNames[i] = string(colName)
-		direction := catpb.IndexColumn_ASC
+		direction := catenumpb.IndexColumn_ASC
 		if columnNode.Direction == tree.Descending {
-			direction = catpb.IndexColumn_DESC
+			direction = catenumpb.IndexColumn_DESC
 		}
 		ic := &scpb.IndexColumn{
 			TableID:       idxSpec.secondary.TableID,
@@ -647,7 +647,7 @@ func addColumnsForSecondaryIndex(
 			ColumnID:      column.ColumnID,
 			OrdinalInKind: 0,
 			Kind:          scpb.IndexColumn_KEY,
-			Direction:     catpb.IndexColumn_ASC,
+			Direction:     catenumpb.IndexColumn_ASC,
 		}
 		// Remove the sharded column if it's there in the primary
 		// index already, before adding it.

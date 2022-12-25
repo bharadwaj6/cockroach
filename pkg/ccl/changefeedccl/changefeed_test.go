@@ -2203,7 +2203,8 @@ func fetchDescVersionModificationTime(
 			if tableID != uint64(dropColTblID) {
 				continue
 			}
-			unsafeValue := it.UnsafeValue()
+			unsafeValue, err := it.UnsafeValue()
+			require.NoError(t, err)
 			if unsafeValue == nil {
 				t.Fatal(errors.New(`value was dropped or truncated`))
 			}
@@ -2762,7 +2763,7 @@ func TestChangefeedRestartMultiNode(t *testing.T) {
 	sqlDB.Exec(t, `CREATE TABLE test_tab (a INT PRIMARY KEY, b INT UNIQUE NOT NULL)`)
 	sqlDB.Exec(t, `INSERT INTO test_tab VALUES (0, 0)`)
 
-	row := sqlDB.QueryRow(t, `SELECT range_id, lease_holder FROM [SHOW RANGES FROM TABLE test_tab] LIMIT 1`)
+	row := sqlDB.QueryRow(t, `SELECT range_id, lease_holder FROM [SHOW RANGES FROM TABLE test_tab WITH DETAILS] LIMIT 1`)
 	var rangeID, leaseHolder int
 	row.Scan(&rangeID, &leaseHolder)
 
@@ -2820,7 +2821,7 @@ func TestChangefeedStopPolicyMultiNode(t *testing.T) {
 	sqlDB.Exec(t, `CREATE TABLE test_tab (a INT PRIMARY KEY)`)
 	sqlDB.Exec(t, `INSERT INTO test_tab VALUES (0)`)
 
-	row := sqlDB.QueryRow(t, `SELECT range_id, lease_holder FROM [SHOW RANGES FROM TABLE test_tab] LIMIT 1`)
+	row := sqlDB.QueryRow(t, `SELECT range_id, lease_holder FROM [SHOW RANGES FROM TABLE test_tab WITH DETAILS] LIMIT 1`)
 	var rangeID, leaseHolder int
 	row.Scan(&rangeID, &leaseHolder)
 
@@ -3468,15 +3469,8 @@ func TestChangefeedMonitoring(t *testing.T) {
 			t.Errorf(`expected 0 got %d`, c)
 		}
 
-		enableSLIMetrics = false
 		foo := feed(t, f, `CREATE CHANGEFEED FOR foo WITH metrics_label='tier0'`)
 		_, err := foo.Next()
-		require.Regexp(t, "cannot create metrics scope", err)
-		require.NoError(t, foo.Close())
-
-		enableSLIMetrics = true
-		foo = feed(t, f, `CREATE CHANGEFEED FOR foo WITH metrics_label='tier0'`)
-		_, err = foo.Next()
 		require.NoError(t, err)
 
 		testutils.SucceedsSoon(t, func() error {
@@ -3558,7 +3552,7 @@ func TestChangefeedRetryableError(t *testing.T) {
 		knobs.BeforeEmitRow = func(_ context.Context) error {
 			switch atomic.LoadInt64(&failEmit) {
 			case 1:
-				return errors.New("synthetic retryable error")
+				return changefeedbase.MarkRetryableError(fmt.Errorf("synthetic retryable error"))
 			case 2:
 				return changefeedbase.WithTerminalError(errors.New("synthetic terminal error"))
 			default:

@@ -22,7 +22,7 @@ import (
 
 	"github.com/cockroachdb/cockroach/pkg/base"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catalogkeys"
-	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catpb"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catenumpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
 	"github.com/cockroachdb/cockroach/pkg/util/encoding"
 	"github.com/cockroachdb/cockroach/pkg/util/tracing/tracingpb"
@@ -155,7 +155,7 @@ func (tr *TableReaderSpec) summary() (string, []string) {
 		keyDirs := make([]encoding.Direction, len(tr.FetchSpec.KeyAndSuffixColumns))
 		for i := range keyDirs {
 			keyDirs[i] = encoding.Ascending
-			if tr.FetchSpec.KeyAndSuffixColumns[i].Direction == catpb.IndexColumn_DESC {
+			if tr.FetchSpec.KeyAndSuffixColumns[i].Direction == catenumpb.IndexColumn_DESC {
 				keyDirs[i] = encoding.Descending
 			}
 		}
@@ -588,6 +588,24 @@ func (s *TTLSpec) summary() (string, []string) {
 		fmt.Sprintf("TableID: %d", details.TableID),
 		fmt.Sprintf("TableVersion: %d", details.TableVersion),
 	}
+}
+
+// summary implements the diagramCellType interface.
+func (s *HashGroupJoinerSpec) summary() (string, []string) {
+	_, details := s.HashJoinerSpec.summary()
+	if len(s.JoinOutputColumns) > 0 {
+		details = append(details, "Join Projection: "+colListStr(s.JoinOutputColumns))
+	}
+	_, aggDetails := s.AggregatorSpec.summary()
+	if len(s.AggregatorSpec.GroupCols) > 0 {
+		// For hash group-join the equality columns of the join are always the
+		// same as the grouping columns of the aggregations, so we remove this
+		// duplicated information (which is included as the first line in the
+		// summary of the aggregation spec).
+		aggDetails = aggDetails[1:]
+	}
+	details = append(details, aggDetails...)
+	return "HashGroupJoiner", details
 }
 
 type diagramCell struct {

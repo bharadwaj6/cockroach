@@ -22,9 +22,9 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/ordering"
 	"github.com/cockroachdb/cockroach/pkg/sql/opt/props/physical"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/eval"
-	"github.com/cockroachdb/cockroach/pkg/util"
 	"github.com/cockroachdb/cockroach/pkg/util/cancelchecker"
 	"github.com/cockroachdb/cockroach/pkg/util/errorutil"
+	"github.com/cockroachdb/cockroach/pkg/util/intsets"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/errors"
 )
@@ -40,7 +40,7 @@ type MatchedRuleFunc = norm.MatchedRuleFunc
 type AppliedRuleFunc = norm.AppliedRuleFunc
 
 // RuleSet efficiently stores an unordered set of RuleNames.
-type RuleSet = util.FastIntSet
+type RuleSet = intsets.Fast
 
 // Optimizer transforms an input expression tree into the logically equivalent
 // output expression tree with the lowest possible execution cost.
@@ -484,9 +484,9 @@ func (o *Optimizer) optimizeGroup(grp memo.RelExpr, required *physical.Required)
 	}
 
 	// Check whether the optimization has been canceled (most likely due to a
-	// statement timeout). Internally, only every 1024th Check() call will poll
-	// on the Done channel, so this should only have negligible performance
-	// overhead.
+	// statement timeout). Internally, only every 1024th Check() call (or every
+	// nth Check(), if overridden, where n is a power of 2) will poll on the Done
+	// channel, so this should only have negligible performance overhead.
 	if err := o.cancelChecker.Check(); err != nil {
 		panic(err)
 	}
@@ -950,7 +950,7 @@ type groupState struct {
 	// expression in the group that has been fully optimized for the required
 	// properties. These never need to be recosted, no matter how many additional
 	// optimization passes are made.
-	fullyOptimizedExprs util.FastIntSet
+	fullyOptimizedExprs intsets.Fast
 
 	// explore is used by the explorer to store intermediate state so that
 	// redundant work is minimized.
@@ -1004,7 +1004,7 @@ func (a *groupStateAlloc) allocate() *groupState {
 
 // disableRulesRandom disables rules with the given probability for testing.
 func (o *Optimizer) disableRulesRandom(probability float64) {
-	essentialRules := util.MakeFastIntSet(
+	essentialRules := intsets.MakeFast(
 		// Needed to prevent constraint building from failing.
 		int(opt.NormalizeInConst),
 		// Needed when an index is forced.

@@ -28,10 +28,12 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/server/telemetry"
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catenumpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catprivilege"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/colinfo"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descs"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/multiregion"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/resolver"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/schemaexpr"
@@ -168,8 +170,9 @@ func getSchemaForCreateTable(
 		return nil, err
 	}
 
-	desc, err := params.p.Descriptors().Direct().GetDescriptorCollidingWithObject(
+	desc, err := descs.GetDescriptorCollidingWithObjectName(
 		params.ctx,
+		params.p.Descriptors(),
 		params.p.txn,
 		db.GetID(),
 		schema.GetID(),
@@ -361,7 +364,6 @@ func (n *createTableNode) startExec(params runParams) error {
 		n.dbDesc.GetID(),
 		params.SessionData().User(),
 		privilege.Tables,
-		n.dbDesc.GetPrivileges(),
 	)
 	if n.n.As() {
 		asCols := planColumns(n.sourcePlan)
@@ -2054,7 +2056,7 @@ func NewTableDesc(
 				// partitioned column.
 				if numImplicitCols := newPrimaryIndex.Partitioning.NumImplicitColumns; numImplicitCols > 0 {
 					for _, idx := range desc.PublicNonPrimaryIndexes() {
-						if idx.GetEncodingType() != descpb.SecondaryIndexEncoding {
+						if idx.GetEncodingType() != catenumpb.SecondaryIndexEncoding {
 							continue
 						}
 						colIDs := idx.CollectKeyColumnIDs()
@@ -2625,7 +2627,7 @@ func replaceLikeTableOpts(n *tree.CreateTable, params runParams) (tree.TableDefs
 							return nil, err
 						}
 					}
-					if idx.GetKeyColumnDirection(j) == catpb.IndexColumn_DESC {
+					if idx.GetKeyColumnDirection(j) == catenumpb.IndexColumn_DESC {
 						elem.Direction = tree.Descending
 					}
 					indexDef.Columns = append(indexDef.Columns, elem)

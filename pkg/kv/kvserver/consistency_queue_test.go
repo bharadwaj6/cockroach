@@ -24,6 +24,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/kv"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/kvserverbase"
+	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/kvstorage"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/stateloader"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/server"
@@ -370,7 +371,7 @@ func TestCheckConsistencyInconsistent(t *testing.T) {
 
 		// Find the problematic range in the storage.
 		var desc *roachpb.RangeDescriptor
-		require.NoError(t, kvserver.IterateRangeDescriptorsFromDisk(context.Background(), cpEng,
+		require.NoError(t, kvstorage.IterateRangeDescriptorsFromDisk(context.Background(), cpEng,
 			func(rd roachpb.RangeDescriptor) error {
 				if rd.RangeID == resp.Result[0].RangeID {
 					desc = &rd
@@ -542,25 +543,26 @@ func testConsistencyQueueRecomputeStatsImpl(t *testing.T, hadEstimates bool) {
 	// RecomputeStats does not see any skew in its MVCC stats when they are
 	// modified concurrently. Note that these writes don't interfere with the
 	// field we modified (SysCount).
+	//
+	// We want to run this task under the cluster's stopper, as opposed to the
+	// first node's stopper, so that the quiesce signal is delivered below before
+	// individual nodes start shutting down.
 	_ = tc.Stopper().RunAsyncTaskEx(ctx,
 		stop.TaskOpts{
 			TaskName: "recompute-loop",
-			// We want to run this task under the cluster's stopper, so that the
-			// quiesce signal is delivered below before individual nodes start
-			// shutting down. Since we're going to operate on a specific node, we
-			// can't mix the cluster stopper's tracer with the node's tracer, hence
-			// the Sterile option.
-			SpanOpt: stop.SterileRootSpan,
-		}, func(ctx context.Context) {
+		}, func(_ context.Context) {
 			// This channel terminates the loop early if the test takes more than five
 			// seconds. This is useful for stress race runs in CI where the tight loop
 			// can starve the actual work to be done.
 			done := time.After(5 * time.Second)
 			for {
-				require.NoError(t, db0.Put(ctx, fmt.Sprintf("%s%d", key, rand.Int63()), "ballast"))
+				// We're using context.Background for the KV call. As explained above,
+				// this task runs on the cluster's stopper, and so the ctx that was
+				// passed to this function has a span created with a Tracer that's
+				// different from the first node's Tracer. If we used the ctx, we'd be
+				// combining Tracers in the trace, which is illegal.
+				require.NoError(t, db0.Put(context.Background(), fmt.Sprintf("%s%d", key, rand.Int63()), "ballast"))
 				select {
-				case <-ctx.Done():
-					return
 				case <-tc.Stopper().ShouldQuiesce():
 					return
 				case <-done:

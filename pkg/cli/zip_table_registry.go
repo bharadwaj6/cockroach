@@ -131,7 +131,7 @@ var zipInternalTablesPerCluster = DebugZipTableRegistry{
 			"node_id",
 			"since",
 			"status",
-			"crdb_internal.anonymize_sql_constants(stmt) as stmt",
+			"crdb_internal.hide_sql_constants(stmt) as stmt",
 		},
 	},
 	"crdb_internal.cluster_execution_insights": {
@@ -195,7 +195,7 @@ var zipInternalTablesPerCluster = DebugZipTableRegistry{
 			"distributed",
 			"phase",
 			"full_scan",
-			"crdb_internal.anonymize_sql_constants(query) as query",
+			"crdb_internal.hide_sql_constants(query) as query",
 		},
 	},
 	"crdb_internal.cluster_sessions": {
@@ -213,8 +213,8 @@ var zipInternalTablesPerCluster = DebugZipTableRegistry{
 			"max_alloc_bytes",
 			"status",
 			"session_end",
-			"crdb_internal.anonymize_sql_constants(active_queries) as active_queries",
-			"crdb_internal.anonymize_sql_constants(last_active_query) as last_active_query",
+			"crdb_internal.hide_sql_constants(active_queries) as active_queries",
+			"crdb_internal.hide_sql_constants(last_active_query) as last_active_query",
 		},
 	},
 	"crdb_internal.cluster_settings": {
@@ -251,7 +251,7 @@ var zipInternalTablesPerCluster = DebugZipTableRegistry{
 			"schema_id",
 			"function_id",
 			"function_name",
-			"crdb_internal.anonymize_sql_constants(create_statement) as create_statement",
+			"crdb_internal.hide_sql_constants(create_statement) as create_statement",
 		},
 	},
 	// The synthetic SQL CREATE statements for all tables.
@@ -278,9 +278,9 @@ var zipInternalTablesPerCluster = DebugZipTableRegistry{
 			"is_multi_region",
 			"is_virtual",
 			"is_temporary",
-			"crdb_internal.anonymize_sql_constants(create_statement) as create_statement",
-			"crdb_internal.anonymize_sql_constants(alter_statements) as alter_statements",
-			"crdb_internal.anonymize_sql_constants(create_nofks) as create_nofks",
+			"crdb_internal.hide_sql_constants(create_statement) as create_statement",
+			"crdb_internal.hide_sql_constants(alter_statements) as alter_statements",
+			"crdb_internal.hide_sql_constants(create_nofks) as create_nofks",
 		},
 	},
 	// Ditto, for CREATE TYPE.
@@ -349,6 +349,22 @@ var zipInternalTablesPerCluster = DebugZipTableRegistry{
 			"last_run",
 			"next_run",
 			"num_runs",
+		},
+	},
+	"crdb_internal.system_jobs": {
+		// `payload` column may contain customer info, such as URI params
+		// containing access keys, encryption salts, etc.
+		nonSensitiveCols: NonSensitiveColumns{
+			"id",
+			"status",
+			"created",
+			"progress",
+			"created_by_type",
+			"created_by_id",
+			"claim_session_id",
+			"claim_instance_id",
+			"num_runs",
+			"last_run",
 		},
 	},
 	"crdb_internal.kv_node_liveness": {
@@ -533,12 +549,6 @@ var zipInternalTablesPerNode = DebugZipTableRegistry{
 			"updated_at",
 		},
 	},
-	"crdb_internal.gossip_network": {
-		nonSensitiveCols: NonSensitiveColumns{
-			"source_id",
-			"target_id",
-		},
-	},
 	"crdb_internal.gossip_nodes": {
 		// `cluster_name` is hashed as we only care to see whether values are
 		// identical across nodes.
@@ -584,7 +594,7 @@ var zipInternalTablesPerNode = DebugZipTableRegistry{
 			"stmt",
 			"since",
 			"status",
-			"crdb_internal.anonymize_sql_constants(stmt) as stmt",
+			"crdb_internal.hide_sql_constants(stmt) as stmt",
 		},
 	},
 	"crdb_internal.node_execution_insights": {
@@ -646,7 +656,7 @@ var zipInternalTablesPerNode = DebugZipTableRegistry{
 			"distributed",
 			"phase",
 			"full_scan",
-			"crdb_internal.anonymize_sql_constants(query) as query",
+			"crdb_internal.hide_sql_constants(query) as query",
 		},
 	},
 	"crdb_internal.node_runtime_info": {
@@ -672,8 +682,8 @@ var zipInternalTablesPerNode = DebugZipTableRegistry{
 			"max_alloc_bytes",
 			"status",
 			"session_end",
-			"crdb_internal.anonymize_sql_constants(active_queries) as active_queries",
-			"crdb_internal.anonymize_sql_constants(last_active_query) as last_active_query",
+			"crdb_internal.hide_sql_constants(active_queries) as active_queries",
+			"crdb_internal.hide_sql_constants(last_active_query) as last_active_query",
 		},
 	},
 	"crdb_internal.node_statement_statistics": {

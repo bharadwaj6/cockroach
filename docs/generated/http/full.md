@@ -1246,7 +1246,7 @@ Support status: [reserved](#support-status)
 #### RaftState
 
 RaftState gives internal details about a Raft group's state.
-Closely mirrors the upstream definitions in github.com/etcd-io/etcd/raft.
+Closely mirrors the upstream definitions in github.com/etcd-io/raft.
 
 | Field | Type | Label | Description | Support status |
 | ----- | ---- | ----- | ----------- | -------------- |
@@ -1492,7 +1492,7 @@ Support status: [reserved](#support-status)
 #### RaftState
 
 RaftState gives internal details about a Raft group's state.
-Closely mirrors the upstream definitions in github.com/etcd-io/etcd/raft.
+Closely mirrors the upstream definitions in github.com/etcd-io/raft.
 
 | Field | Type | Label | Description | Support status |
 | ----- | ---- | ----- | ----------- | -------------- |
@@ -2142,6 +2142,10 @@ ActiveQuery represents a query in flight on some Session.
 | plan_gist | [string](#cockroach.server.serverpb.ListSessionsResponse-string) |  | The compressed plan that can be converted back into the statement's logical plan. Empty if the statement is in the PREPARING state. | [reserved](#support-status) |
 | placeholders | [string](#cockroach.server.serverpb.ListSessionsResponse-string) | repeated | The placeholders if any. | [reserved](#support-status) |
 | database | [string](#cockroach.server.serverpb.ListSessionsResponse-string) |  | The database the statement was executed on. | [reserved](#support-status) |
+| session_id | [bytes](#cockroach.server.serverpb.ListSessionsResponse-bytes) |  | The ID for the session that the statement was executed on (uint128 represented as raw bytes). | [reserved](#support-status) |
+| app_name | [string](#cockroach.server.serverpb.ListSessionsResponse-string) |  | The application name for the session that the statement was executed on. | [reserved](#support-status) |
+| username | [string](#cockroach.server.serverpb.ListSessionsResponse-string) |  | The user name for the session that the statement was executed on. | [reserved](#support-status) |
+| client_address | [string](#cockroach.server.serverpb.ListSessionsResponse-string) |  | The client address for the session that the statement was executed on. | [reserved](#support-status) |
 
 
 
@@ -2287,6 +2291,10 @@ ActiveQuery represents a query in flight on some Session.
 | plan_gist | [string](#cockroach.server.serverpb.ListSessionsResponse-string) |  | The compressed plan that can be converted back into the statement's logical plan. Empty if the statement is in the PREPARING state. | [reserved](#support-status) |
 | placeholders | [string](#cockroach.server.serverpb.ListSessionsResponse-string) | repeated | The placeholders if any. | [reserved](#support-status) |
 | database | [string](#cockroach.server.serverpb.ListSessionsResponse-string) |  | The database the statement was executed on. | [reserved](#support-status) |
+| session_id | [bytes](#cockroach.server.serverpb.ListSessionsResponse-bytes) |  | The ID for the session that the statement was executed on (uint128 represented as raw bytes). | [reserved](#support-status) |
+| app_name | [string](#cockroach.server.serverpb.ListSessionsResponse-string) |  | The application name for the session that the statement was executed on. | [reserved](#support-status) |
+| username | [string](#cockroach.server.serverpb.ListSessionsResponse-string) |  | The user name for the session that the statement was executed on. | [reserved](#support-status) |
+| client_address | [string](#cockroach.server.serverpb.ListSessionsResponse-string) |  | The client address for the session that the statement was executed on. | [reserved](#support-status) |
 
 
 
@@ -3710,7 +3718,7 @@ Support status: [reserved](#support-status)
 #### RaftState
 
 RaftState gives internal details about a Raft group's state.
-Closely mirrors the upstream definitions in github.com/etcd-io/etcd/raft.
+Closely mirrors the upstream definitions in github.com/etcd-io/raft.
 
 | Field | Type | Label | Description | Support status |
 | ----- | ---- | ----- | ----------- | -------------- |
@@ -7192,6 +7200,230 @@ sets the recording mode of all or some of the spans in a trace.
 
 SetTraceRecordingTypeRequest is the response for SetTraceRecordingType.
 
+
+
+
+
+
+
+
+## RecoveryCollectReplicaInfo
+
+
+
+RecoveryCollectReplicaInfo retrieves information about:
+1. range descriptors contained in cluster meta ranges if meta ranges
+   are readable;
+2. replica information from all live nodes that have connection to
+   the target node.
+
+Support status: [reserved](#support-status)
+
+#### Request Parameters
+
+
+
+
+
+
+
+
+
+
+
+
+
+#### Response Parameters
+
+
+
+
+
+
+
+| Field | Type | Label | Description | Support status |
+| ----- | ---- | ----- | ----------- | -------------- |
+| range_descriptor | [cockroach.roachpb.RangeDescriptor](#cockroach.server.serverpb.RecoveryCollectReplicaInfoResponse-cockroach.roachpb.RangeDescriptor) |  |  | [reserved](#support-status) |
+| replica_info | [cockroach.kv.kvserver.loqrecovery.loqrecoverypb.ReplicaInfo](#cockroach.server.serverpb.RecoveryCollectReplicaInfoResponse-cockroach.kv.kvserver.loqrecovery.loqrecoverypb.ReplicaInfo) |  |  | [reserved](#support-status) |
+
+
+
+
+
+
+
+## RecoveryCollectLocalReplicaInfo
+
+
+
+RecoveryCollectLocalReplicaInfo retrieve information about all local
+replicas in all stores on the node.
+
+Support status: [reserved](#support-status)
+
+#### Request Parameters
+
+
+
+
+
+
+
+
+
+
+
+
+
+#### Response Parameters
+
+
+
+
+
+
+
+| Field | Type | Label | Description | Support status |
+| ----- | ---- | ----- | ----------- | -------------- |
+| replica_info | [cockroach.kv.kvserver.loqrecovery.loqrecoverypb.ReplicaInfo](#cockroach.server.serverpb.RecoveryCollectLocalReplicaInfoResponse-cockroach.kv.kvserver.loqrecovery.loqrecoverypb.ReplicaInfo) |  |  | [reserved](#support-status) |
+
+
+
+
+
+
+
+## RecoveryStagePlan
+
+
+
+RecoveryStagePlan stages recovery plan on target or all nodes in cluster
+depending on request content and marks nodes deleted in the plan as
+decommissioned in each node's local node tombstone storage.
+
+Support status: [reserved](#support-status)
+
+#### Request Parameters
+
+
+
+
+
+
+
+| Field | Type | Label | Description | Support status |
+| ----- | ---- | ----- | ----------- | -------------- |
+| plan | [cockroach.kv.kvserver.loqrecovery.loqrecoverypb.ReplicaUpdatePlan](#cockroach.server.serverpb.RecoveryStagePlanRequest-cockroach.kv.kvserver.loqrecovery.loqrecoverypb.ReplicaUpdatePlan) |  | Plan is replica update plan to stage for application on next restart. Plan could be empty in that case existing plan is removed if present. | [reserved](#support-status) |
+| all_nodes | [bool](#cockroach.server.serverpb.RecoveryStagePlanRequest-bool) |  | If all nodes is true, then receiver should act as a coordinator and perform a fan-out to stage plan on all nodes of the cluster. | [reserved](#support-status) |
+| force_plan | [bool](#cockroach.server.serverpb.RecoveryStagePlanRequest-bool) |  | Force plan tells receiver to ignore any plan already staged on the node if it is present and replace it with new plan (including empty one). | [reserved](#support-status) |
+
+
+
+
+
+
+
+#### Response Parameters
+
+
+
+
+
+
+
+| Field | Type | Label | Description | Support status |
+| ----- | ---- | ----- | ----------- | -------------- |
+| errors | [string](#cockroach.server.serverpb.RecoveryStagePlanResponse-string) | repeated | Errors contain error messages happened during plan staging. | [reserved](#support-status) |
+
+
+
+
+
+
+
+## RecoveryNodeStatus
+
+
+
+RecoveryNodeStatus retrieves loss of quorum recovery status of a single
+node.
+
+Support status: [reserved](#support-status)
+
+#### Request Parameters
+
+
+
+
+
+
+
+
+
+
+
+
+
+#### Response Parameters
+
+
+
+
+
+
+
+| Field | Type | Label | Description | Support status |
+| ----- | ---- | ----- | ----------- | -------------- |
+| status | [cockroach.kv.kvserver.loqrecovery.loqrecoverypb.NodeRecoveryStatus](#cockroach.server.serverpb.RecoveryNodeStatusResponse-cockroach.kv.kvserver.loqrecovery.loqrecoverypb.NodeRecoveryStatus) |  |  | [reserved](#support-status) |
+
+
+
+
+
+
+
+## RecoveryVerify
+
+
+
+RecoveryVerify verifies that recovery plan is applied on all necessary
+nodes, ranges are available and nodes removed in plan are marked as
+decommissioned.
+
+Support status: [reserved](#support-status)
+
+#### Request Parameters
+
+
+
+
+
+
+
+| Field | Type | Label | Description | Support status |
+| ----- | ---- | ----- | ----------- | -------------- |
+| plan_id | [bytes](#cockroach.server.serverpb.RecoveryVerifyRequest-bytes) |  | PlanID is ID of the plan to verify. | [reserved](#support-status) |
+| decommissioned_node_ids | [int32](#cockroach.server.serverpb.RecoveryVerifyRequest-int32) | repeated | DecommissionedNodeIDs is a set of nodes that should be marked as decommissioned in the cluster when loss of quorum recovery successfully applies. | [reserved](#support-status) |
+
+
+
+
+
+
+
+#### Response Parameters
+
+
+
+
+
+
+
+| Field | Type | Label | Description | Support status |
+| ----- | ---- | ----- | ----------- | -------------- |
+| statuses | [cockroach.kv.kvserver.loqrecovery.loqrecoverypb.NodeRecoveryStatus](#cockroach.server.serverpb.RecoveryVerifyResponse-cockroach.kv.kvserver.loqrecovery.loqrecoverypb.NodeRecoveryStatus) | repeated | Statuses contain a list of recovery statuses of nodes updated during recovery. It also contains nodes that were expected to be live (not decommissioned by recovery) but failed to return status response. | [reserved](#support-status) |
+| unavailable_ranges | [cockroach.roachpb.RangeDescriptor](#cockroach.server.serverpb.RecoveryVerifyResponse-cockroach.roachpb.RangeDescriptor) | repeated | Unavailable ranges contains descriptors of ranges that failed health checks. | [reserved](#support-status) |
+| decommissioned_node_ids | [int32](#cockroach.server.serverpb.RecoveryVerifyResponse-int32) | repeated | DecommissionedNodeIDs contains list of decommissioned node id's. Only nodes that were decommissioned by the plan would be listed here, not all historically decommissioned ones. | [reserved](#support-status) |
 
 
 

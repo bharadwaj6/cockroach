@@ -429,11 +429,7 @@ func (s *Streamer) Init(
 //
 // In InOrder operation mode, responses will be delivered in reqs order. When
 // more than one row is returned for a given request, the rows for that request
-// will be sorted in the order of the lookup index if the index contains only
-// ascending columns.
-// TODO(drewk): lift the restriction that index columns must be ASC in order to
-//
-//	return results in lookup order.
+// will be sorted in the order of the lookup index.
 //
 // It is the caller's responsibility to ensure that the memory footprint of reqs
 // (i.e. roachpb.Spans inside of the requests) is reasonable. Enqueue will
@@ -536,7 +532,10 @@ func (s *Streamer) Enqueue(ctx context.Context, reqs []roachpb.RequestUnion) (re
 	}
 	var reqsKeysScratch []roachpb.Key
 	var newNumRangesPerScanRequestMemoryUsage int64
-	for {
+	for ; ; ri.Seek(ctx, rs.Key, scanDir) {
+		if !ri.Valid() {
+			return ri.Error()
+		}
 		// Find all requests that touch the current range.
 		var singleRangeReqs []roachpb.RequestUnion
 		var positions []int
@@ -630,11 +629,12 @@ func (s *Streamer) Enqueue(ctx context.Context, reqs []roachpb.RequestUnion) (re
 		requestsToServe = append(requestsToServe, r)
 		s.enqueuedSingleRangeRequests += len(singleRangeReqs)
 
-		if !ri.NeedAnother(rs) {
-			// This was the last range.
+		if allRequestsAreWithinSingleRange || !ri.NeedAnother(rs) {
+			// This was the last range. Breaking here rather than Seek'ing the
+			// iterator to RKeyMax (and, thus, invalidating it) allows us to
+			// avoid adding a confusing message into the trace.
 			break
 		}
-		ri.Seek(ctx, rs.Key, scanDir)
 	}
 
 	if streamerLocked {

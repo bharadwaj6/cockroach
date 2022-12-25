@@ -341,6 +341,10 @@ var varGen = map[string]sessionVar{
 		},
 	},
 
+	// See https://www.postgresql.org/docs/15/datatype-datetime.html.
+	// We always log in UTC.
+	`log_timezone`: makeCompatStringVar(`log_timezone`, `UTC`),
+
 	// This is only kept for backwards compatibility and no longer has any effect.
 	`datestyle_enabled`: makeBackwardsCompatBoolVar(
 		"datestyle_enabled", true,
@@ -2352,6 +2356,38 @@ var varGen = map[string]sessionVar{
 			return formatBoolAsPostgresSetting(evalCtx.SessionData().VariableInequalityLookupJoinEnabled), nil
 		},
 		GlobalDefault: globalTrue,
+	},
+
+	// CockroachDB extension.
+	`experimental_hash_group_join_enabled`: {
+		GetStringVal: makePostgresBoolGetStringValFn(`experimental_hash_group_join_enabled`),
+		Set: func(_ context.Context, m sessionDataMutator, s string) error {
+			b, err := paramparse.ParseBoolVar(`experimental_hash_group_join_enabled`, s)
+			if err != nil {
+				return err
+			}
+			m.SetExperimentalHashGroupJoinEnabled(b)
+			return nil
+		},
+		Get: func(evalCtx *extendedEvalContext, _ *kv.Txn) (string, error) {
+			return formatBoolAsPostgresSetting(evalCtx.SessionData().ExperimentalHashGroupJoinEnabled), nil
+		},
+		GlobalDefault: globalFalse,
+	},
+	`allow_ordinal_column_references`: {
+		GetStringVal: makePostgresBoolGetStringValFn(`allow_ordinal_column_references`),
+		Set: func(_ context.Context, m sessionDataMutator, s string) error {
+			b, err := paramparse.ParseBoolVar("allow_ordinal_column_references", s)
+			if err != nil {
+				return err
+			}
+			m.SetAllowOrdinalColumnReference(b)
+			return nil
+		},
+		Get: func(evalCtx *extendedEvalContext, _ *kv.Txn) (string, error) {
+			return formatBoolAsPostgresSetting(evalCtx.SessionData().AllowOrdinalColumnReferences), nil
+		},
+		GlobalDefault: globalFalse,
 	},
 }
 

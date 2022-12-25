@@ -13,6 +13,7 @@ go_library(
     visibility = ["//visibility:public"],
     deps = [
         "//pkg/ccl/streamingccl",
+        "//pkg/ccl/streamingccl/replicationutils",
         "//pkg/ccl/utilccl",
         "//pkg/jobs",
         "//pkg/jobs/jobspb",
@@ -51,13 +52,14 @@ go_library(
 
 go_test(
     name = "streamproducer_test",
+    size = "large",
     srcs = [
         "main_test.go",
         "producer_job_test.go",
         "replication_manager_test.go",
         "replication_stream_test.go",
     ],
-    args = ["-test.timeout=295s"],
+    args = ["-test.timeout=895s"],
     embed = [":streamproducer"],
     deps = [
         "//pkg/base",
@@ -66,7 +68,7 @@ go_test(
         "//pkg/ccl/kvccl/kvtenantccl",
         "//pkg/ccl/storageccl",
         "//pkg/ccl/streamingccl",
-        "//pkg/ccl/streamingccl/streamingtest",
+        "//pkg/ccl/streamingccl/replicationtestutils",
         "//pkg/ccl/utilccl",
         "//pkg/cloud/impl:cloudimpl",
         "//pkg/jobs",

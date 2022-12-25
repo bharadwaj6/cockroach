@@ -18,6 +18,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/cockroachdb/cockroach/pkg/clusterversion"
 	"github.com/cockroachdb/cockroach/pkg/kv"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/gc"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/intentresolver"
@@ -30,6 +31,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util"
 	"github.com/cockroachdb/cockroach/pkg/util/admission/admissionpb"
 	"github.com/cockroachdb/cockroach/pkg/util/contextutil"
+	"github.com/cockroachdb/cockroach/pkg/util/grunning"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/humanizeutil"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
@@ -625,15 +627,15 @@ func (r *replicaGCer) GC(
 	ctx context.Context,
 	keys []roachpb.GCRequest_GCKey,
 	rangeKeys []roachpb.GCRequest_GCRangeKey,
-	clearRangeKey *roachpb.GCRequest_GCClearRangeKey,
+	clearRange *roachpb.GCRequest_GCClearRange,
 ) error {
-	if len(keys) == 0 && len(rangeKeys) == 0 && clearRangeKey == nil {
+	if len(keys) == 0 && len(rangeKeys) == 0 && clearRange == nil {
 		return nil
 	}
 	req := r.template()
 	req.Keys = keys
 	req.RangeKeys = rangeKeys
-	req.ClearRangeKey = clearRangeKey
+	req.ClearRange = clearRange
 	return r.send(ctx, req)
 }
 
@@ -669,6 +671,10 @@ func (r *replicaGCer) GC(
 func (mgcq *mvccGCQueue) process(
 	ctx context.Context, repl *Replica, _ spanconfig.StoreReader,
 ) (processed bool, err error) {
+	// Record the CPU time processing the request for this replica. This is
+	// recorded regardless of errors that are encountered.
+	defer repl.MeasureReqCPUNanos(grunning.Time())
+
 	// Lookup the descriptor and GC policy for the zone containing this key range.
 	desc, conf := repl.DescAndSpanConfig()
 
@@ -710,6 +716,10 @@ func (mgcq *mvccGCQueue) process(
 	maxIntentsPerCleanupBatch := gc.MaxIntentsPerCleanupBatch.Get(&repl.store.ClusterSettings().SV)
 	maxIntentKeyBytesPerCleanupBatch := gc.MaxIntentKeyBytesPerCleanupBatch.Get(&repl.store.ClusterSettings().SV)
 	txnCleanupThreshold := gc.TxnCleanupThreshold.Get(&repl.store.ClusterSettings().SV)
+	var clearRangeMinKeys int64 = 0
+	if repl.store.ClusterSettings().Version.IsActive(ctx, clusterversion.V23_1) {
+		clearRangeMinKeys = gc.ClearRangeMinKeys.Get(&repl.store.ClusterSettings().SV)
+	}
 
 	info, err := gc.Run(ctx, desc, snap, gcTimestamp, newThreshold,
 		gc.RunOptions{
@@ -719,6 +729,7 @@ func (mgcq *mvccGCQueue) process(
 			TxnCleanupThreshold:                    txnCleanupThreshold,
 			MaxTxnsPerIntentCleanupBatch:           intentresolver.MaxTxnsPerIntentCleanupBatch,
 			IntentCleanupBatchTimeout:              mvccGCQueueIntentBatchTimeout,
+			ClearRangeMinKeys:                      clearRangeMinKeys,
 		},
 		conf.TTL(),
 		&replicaGCer{
@@ -810,8 +821,8 @@ func updateStoreMetricsWithGCInfo(metrics *StoreMetrics, info gc.Info) {
 	metrics.GCAbortSpanGCNum.Inc(int64(info.AbortSpanGCNum))
 	metrics.GCPushTxn.Inc(int64(info.PushTxn))
 	metrics.GCResolveTotal.Inc(int64(info.ResolveTotal))
-	metrics.GCUsedClearRange.Inc(int64(info.ClearRangeKeyOperations))
-	metrics.GCFailedClearRange.Inc(int64(info.ClearRangeKeyFailures))
+	metrics.GCUsedClearRange.Inc(int64(info.ClearRangeSpanOperations))
+	metrics.GCFailedClearRange.Inc(int64(info.ClearRangeSpanFailures))
 }
 
 func (mgcq *mvccGCQueue) postProcessScheduled(

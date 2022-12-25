@@ -584,9 +584,14 @@ gossip_liveness                        NULL
 gossip_network                         NULL
 gossip_nodes                           NULL
 index_columns                          NULL
+index_spans                            NULL
 index_usage_statistics                 NULL
 invalid_objects                        NULL
 jobs                                   NULL
+kv_catalog_comments                    NULL
+kv_catalog_descriptor                  NULL
+kv_catalog_namespace                   NULL
+kv_catalog_zones                       NULL
 kv_node_liveness                       NULL
 kv_node_status                         NULL
 kv_store_status                        NULL
@@ -607,7 +612,6 @@ node_transactions                      NULL
 node_txn_stats                         NULL
 partitions                             NULL
 pg_catalog_table_is_implemented        NULL
-predefined_comments                    NULL
 ranges                                 NULL
 ranges_no_leases                       NULL
 regions                                NULL
@@ -616,9 +620,11 @@ session_trace                          NULL
 session_variables                      NULL
 statement_statistics                   NULL
 super_regions                          NULL
+system_jobs                            NULL
 table_columns                          NULL
 table_indexes                          NULL
 table_row_statistics                   NULL
+table_spans                            NULL
 tables                                 NULL
 tenant_usage_details                   NULL
 transaction_contention_events          NULL

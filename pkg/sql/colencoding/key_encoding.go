@@ -16,15 +16,16 @@ import (
 	"github.com/cockroachdb/apd/v3"
 	"github.com/cockroachdb/cockroach/pkg/col/coldata"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
-	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catpb"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catenumpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/rowenc/keyside"
 	"github.com/cockroachdb/cockroach/pkg/sql/rowenc/valueside"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
-	"github.com/cockroachdb/cockroach/pkg/util"
+	"github.com/cockroachdb/cockroach/pkg/util/buildutil"
 	"github.com/cockroachdb/cockroach/pkg/util/duration"
 	"github.com/cockroachdb/cockroach/pkg/util/encoding"
+	"github.com/cockroachdb/cockroach/pkg/util/intsets"
 	"github.com/cockroachdb/errors"
 	"github.com/cockroachdb/redact"
 )
@@ -51,7 +52,7 @@ func DecodeKeyValsToCols(
 	indexColIdx []int,
 	checkAllColsForNull bool,
 	keyCols []descpb.IndexFetchSpec_KeyColumn,
-	unseen *util.FastIntSet,
+	unseen *intsets.Fast,
 	key []byte,
 	scratch []byte,
 ) (remainingKey []byte, foundNull bool, retScratch []byte, _ error) {
@@ -95,10 +96,10 @@ func decodeTableKeyToCol(
 	rowIdx int,
 	valType *types.T,
 	key []byte,
-	dir catpb.IndexColumn_Direction,
+	dir catenumpb.IndexColumn_Direction,
 	scratch []byte,
 ) (_ []byte, _ bool, retScratch []byte, _ error) {
-	if (dir != catpb.IndexColumn_ASC) && (dir != catpb.IndexColumn_DESC) {
+	if (dir != catenumpb.IndexColumn_ASC) && (dir != catenumpb.IndexColumn_DESC) {
 		return nil, false, scratch, errors.AssertionFailedf("invalid direction: %d", redact.Safe(dir))
 	}
 	var isNull bool
@@ -116,7 +117,7 @@ func decodeTableKeyToCol(
 	switch valType.Family() {
 	case types.BoolFamily:
 		var i int64
-		if dir == catpb.IndexColumn_ASC {
+		if dir == catenumpb.IndexColumn_ASC {
 			rkey, i, err = encoding.DecodeVarintAscending(key)
 		} else {
 			rkey, i, err = encoding.DecodeVarintDescending(key)
@@ -124,7 +125,7 @@ func decodeTableKeyToCol(
 		vecs.BoolCols[colIdx][rowIdx] = i != 0
 	case types.IntFamily, types.DateFamily:
 		var i int64
-		if dir == catpb.IndexColumn_ASC {
+		if dir == catenumpb.IndexColumn_ASC {
 			rkey, i, err = encoding.DecodeVarintAscending(key)
 		} else {
 			rkey, i, err = encoding.DecodeVarintDescending(key)
@@ -139,7 +140,7 @@ func decodeTableKeyToCol(
 		}
 	case types.FloatFamily:
 		var f float64
-		if dir == catpb.IndexColumn_ASC {
+		if dir == catenumpb.IndexColumn_ASC {
 			rkey, f, err = encoding.DecodeFloatAscending(key)
 		} else {
 			rkey, f, err = encoding.DecodeFloatDescending(key)
@@ -147,14 +148,14 @@ func decodeTableKeyToCol(
 		vecs.Float64Cols[colIdx][rowIdx] = f
 	case types.DecimalFamily:
 		var d apd.Decimal
-		if dir == catpb.IndexColumn_ASC {
+		if dir == catenumpb.IndexColumn_ASC {
 			rkey, d, err = encoding.DecodeDecimalAscending(key, scratch[:0])
 		} else {
 			rkey, d, err = encoding.DecodeDecimalDescending(key, scratch[:0])
 		}
 		vecs.DecimalCols[colIdx][rowIdx] = d
-	case types.BytesFamily, types.StringFamily, types.UuidFamily:
-		if dir == catpb.IndexColumn_ASC {
+	case types.BytesFamily, types.StringFamily, types.UuidFamily, types.EnumFamily:
+		if dir == catenumpb.IndexColumn_ASC {
 			// We ask for the deep copy to be made so that scratch doesn't
 			// reference the memory of key - this allows us to return scratch
 			// to the caller to be reused. The deep copy additionally ensures
@@ -162,6 +163,7 @@ func decodeTableKeyToCol(
 			// GCed.
 			rkey, scratch, err = encoding.DecodeBytesAscendingDeepCopy(key, scratch[:0])
 		} else {
+			// DecodeBytesDescending always performs a deep copy.
 			rkey, scratch, err = encoding.DecodeBytesDescending(key, scratch[:0])
 		}
 		// Set() performs a deep copy, so it is safe to return the scratch slice
@@ -170,7 +172,7 @@ func decodeTableKeyToCol(
 		vecs.BytesCols[colIdx].Set(rowIdx, scratch)
 	case types.TimestampFamily, types.TimestampTZFamily:
 		var t time.Time
-		if dir == catpb.IndexColumn_ASC {
+		if dir == catenumpb.IndexColumn_ASC {
 			rkey, t, err = encoding.DecodeTimeAscending(key)
 		} else {
 			rkey, t, err = encoding.DecodeTimeDescending(key)
@@ -178,7 +180,7 @@ func decodeTableKeyToCol(
 		vecs.TimestampCols[colIdx][rowIdx] = t
 	case types.IntervalFamily:
 		var d duration.Duration
-		if dir == catpb.IndexColumn_ASC {
+		if dir == catenumpb.IndexColumn_ASC {
 			rkey, d, err = encoding.DecodeDurationAscending(key)
 		} else {
 			rkey, d, err = encoding.DecodeDurationDescending(key)
@@ -202,7 +204,7 @@ func decodeTableKeyToCol(
 	default:
 		var d tree.Datum
 		encDir := encoding.Ascending
-		if dir == catpb.IndexColumn_DESC {
+		if dir == catenumpb.IndexColumn_DESC {
 			encDir = encoding.Descending
 		}
 		d, rkey, err = keyside.Decode(da, valType, key, encDir)
@@ -211,12 +213,12 @@ func decodeTableKeyToCol(
 	return rkey, false, scratch, err
 }
 
-// UnmarshalColumnValueToCol decodes the value from a roachpb.Value using the
-// type expected by the column, writing into the vecIdx'th vector of
-// coldata.TypedVecs at the given rowIdx. An error is returned if the value's
-// type does not match the column's type.
-// See the analog, rowenc.UnmarshalColumnValue, in
-// rowenc/column_type_encoding.go.
+// UnmarshalColumnValueToCol decodes the value from a non-zero length
+// roachpb.Value using the type expected by the column, writing into the
+// vecIdx'th vector of coldata.TypedVecs at the given rowIdx. An error is
+// returned if the value's type does not match the column's type.
+//
+// See the analog, valueside.UnmarshalLegacy, in valueside/legacy.go.
 func UnmarshalColumnValueToCol(
 	da *tree.DatumAlloc,
 	vecs *coldata.TypedVecs,
@@ -224,10 +226,11 @@ func UnmarshalColumnValueToCol(
 	typ *types.T,
 	value roachpb.Value,
 ) error {
-	if value.RawBytes == nil {
-		vecs.Nulls[vecIdx].SetNull(rowIdx)
+	if buildutil.CrdbTestBuild {
+		if len(value.RawBytes) == 0 {
+			return errors.AssertionFailedf("zero-length value in UnmarshalColumnValueToCol")
+		}
 	}
-
 	// Find the position of the target vector among the typed columns of its
 	// type.
 	colIdx := vecs.ColsMap[vecIdx]
@@ -257,7 +260,7 @@ func UnmarshalColumnValueToCol(
 		vecs.Float64Cols[colIdx][rowIdx] = v
 	case types.DecimalFamily:
 		err = value.GetDecimalInto(&vecs.DecimalCols[colIdx][rowIdx])
-	case types.BytesFamily, types.StringFamily, types.UuidFamily:
+	case types.BytesFamily, types.StringFamily, types.UuidFamily, types.EnumFamily:
 		var v []byte
 		v, err = value.GetBytes()
 		vecs.BytesCols[colIdx].Set(rowIdx, v)

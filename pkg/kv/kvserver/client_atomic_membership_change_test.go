@@ -26,8 +26,8 @@ import (
 	"github.com/kr/pretty"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"go.etcd.io/etcd/raft/v3/confchange"
-	"go.etcd.io/etcd/raft/v3/tracker"
+	"go.etcd.io/raft/v3/confchange"
+	"go.etcd.io/raft/v3/tracker"
 )
 
 // TestAtomicReplicationChange is a simple smoke test for atomic membership
@@ -86,7 +86,7 @@ func TestAtomicReplicationChange(t *testing.T) {
 				// the descriptor already matches since the descriptor is updated
 				// a hair earlier.
 				cfg, _, err := confchange.Restore(confchange.Changer{
-					Tracker:   tracker.MakeProgressTracker(1),
+					Tracker:   tracker.MakeProgressTracker(1, 0),
 					LastIndex: 1,
 				}, desc.Replicas().ConfState())
 				require.NoError(t, err)

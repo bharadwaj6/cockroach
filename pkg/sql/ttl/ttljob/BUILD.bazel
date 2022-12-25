@@ -24,6 +24,7 @@ go_library(
         "//pkg/settings",
         "//pkg/settings/cluster",
         "//pkg/sql",
+        "//pkg/sql/catalog/catenumpb",
         "//pkg/sql/catalog/catpb",
         "//pkg/sql/catalog/colinfo",
         "//pkg/sql/catalog/descpb",
@@ -65,7 +66,6 @@ go_test(
     deps = [
         "//pkg/base",
         "//pkg/ccl/kvccl/kvtenantccl",
-        "//pkg/clusterversion",
         "//pkg/jobs",
         "//pkg/jobs/jobspb",
         "//pkg/jobs/jobstest",

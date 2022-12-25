@@ -91,6 +91,23 @@ type Provider struct {
 	}
 }
 
+func (p *Provider) SnapshotVolume(
+	volume vm.Volume, name, description string, labels map[string]string,
+) (string, error) {
+	// TODO(leon): implement
+	panic("unimplemented")
+}
+
+func (p *Provider) CreateVolume(vm.VolumeCreateOpts) (vm.Volume, error) {
+	// TODO(leon): implement
+	panic("unimplemented")
+}
+
+func (p *Provider) AttachVolumeToVM(vm.Volume, *vm.VM) (string, error) {
+	// TODO(leon): implement
+	panic("unimplemented")
+}
+
 // New constructs a new Provider instance.
 func New() *Provider {
 	p := &Provider{}
@@ -337,7 +354,7 @@ func (p *Provider) Extend(vms vm.List, lifetime time.Duration) error {
 	if err != nil {
 		return err
 	}
-	client := compute.NewVirtualMachinesClient(*sub.ID)
+	client := compute.NewVirtualMachinesClient(*sub.SubscriptionID)
 	if client.Authorizer, err = p.getAuthorizer(); err != nil {
 		return err
 	}
@@ -348,10 +365,16 @@ func (p *Provider) Extend(vms vm.List, lifetime time.Duration) error {
 		if err != nil {
 			return err
 		}
+		// N.B. VirtualMachineUpdate below overwrites _all_ VM tags. Hence, we must copy all unmodified tags.
+		tags := make(map[string]*string)
+		// Copy all known VM tags.
+		for k, v := range m.Labels {
+			tags[k] = to.StringPtr(v)
+		}
+		// Overwrite Lifetime tag.
+		tags[vm.TagLifetime] = to.StringPtr(lifetime.String())
 		update := compute.VirtualMachineUpdate{
-			Tags: map[string]*string{
-				vm.TagLifetime: to.StringPtr(lifetime.String()),
-			},
+			Tags: tags,
 		}
 		futures[idx], err = client.Update(ctx, vmParts.resourceGroup, vmParts.resourceName, update)
 		if err != nil {
@@ -400,7 +423,7 @@ func (p *Provider) FindActiveAccount() (string, error) {
 
 // List implements the vm.Provider interface. This will query all
 // Azure VMs in the subscription and select those with a roachprod tag.
-func (p *Provider) List(l *logger.Logger) (vm.List, error) {
+func (p *Provider) List(l *logger.Logger, opts vm.ListOptions) (vm.List, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), p.OperationTimeout)
 	defer cancel()
 
@@ -852,6 +875,32 @@ func (p *Provider) getOrCreateNetworkSecurityGroup(
 						SourcePortRange:          to.StringPtr("*"),
 						DestinationAddressPrefix: to.StringPtr("*"),
 						DestinationPortRange:     to.StringPtr("26258"),
+					},
+				},
+				{
+					Name: to.StringPtr("Grafana_Inbound"),
+					SecurityRulePropertiesFormat: &network.SecurityRulePropertiesFormat{
+						Priority:                 to.Int32Ptr(344),
+						Protocol:                 network.SecurityRuleProtocolTCP,
+						Access:                   network.SecurityRuleAccessAllow,
+						Direction:                network.SecurityRuleDirectionInbound,
+						SourceAddressPrefix:      to.StringPtr("*"),
+						SourcePortRange:          to.StringPtr("*"),
+						DestinationAddressPrefix: to.StringPtr("*"),
+						DestinationPortRange:     to.StringPtr("3000"),
+					},
+				},
+				{
+					Name: to.StringPtr("Prometheus_Inbound"),
+					SecurityRulePropertiesFormat: &network.SecurityRulePropertiesFormat{
+						Priority:                 to.Int32Ptr(345),
+						Protocol:                 network.SecurityRuleProtocolTCP,
+						Access:                   network.SecurityRuleAccessAllow,
+						Direction:                network.SecurityRuleDirectionInbound,
+						SourceAddressPrefix:      to.StringPtr("*"),
+						SourcePortRange:          to.StringPtr("*"),
+						DestinationAddressPrefix: to.StringPtr("*"),
+						DestinationPortRange:     to.StringPtr("9090"),
 					},
 				},
 			},

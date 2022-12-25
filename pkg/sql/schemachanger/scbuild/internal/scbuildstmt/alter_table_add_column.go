@@ -16,6 +16,7 @@ import (
 	"strings"
 
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catenumpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/colinfo"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
@@ -448,19 +449,19 @@ func getNextStoredIndexColumnOrdinal(allTargets ElementResultSet, idx *scpb.Prim
 // getImplicitSecondaryIndexName determines the implicit name for a secondary
 // index, this logic matches tabledesc.BuildIndexName.
 func getImplicitSecondaryIndexName(
-	b BuildCtx, tbl *scpb.Table, id descpb.IndexID, numImplicitColumns int,
+	b BuildCtx, descID descpb.ID, indexID descpb.IndexID, numImplicitColumns int,
 ) string {
-	elts := b.QueryByID(tbl.TableID).Filter(notAbsentTargetFilter)
+	elts := b.QueryByID(descID).Filter(notAbsentTargetFilter)
 	var idx *scpb.Index
 	scpb.ForEachSecondaryIndex(elts, func(current scpb.Status, target scpb.TargetStatus, e *scpb.SecondaryIndex) {
-		if e.IndexID == id {
+		if e.IndexID == indexID {
 			idx = &e.Index
 		}
 	})
 	if idx == nil {
 		panic(errors.AssertionFailedf("unable to find secondary index."))
 	}
-	keyColumns := getIndexColumns(elts, id, scpb.IndexColumn_KEY)
+	keyColumns := getIndexColumns(elts, indexID, scpb.IndexColumn_KEY)
 	// An index name has a segment for the table name, each key column, and a
 	// final word (either "idx" or "key").
 	segments := make([]string, 0, len(keyColumns)+2)
@@ -588,7 +589,7 @@ func addSecondaryIndexTargetsForAddColumn(
 				len(desc.KeyColumnIDs)+int(partitioning.NumImplicitColumns),
 			)
 			keyColumnDirs := make(
-				[]catpb.IndexColumn_Direction, 0,
+				[]catenumpb.IndexColumn_Direction, 0,
 				len(desc.KeyColumnIDs)+int(partitioning.NumImplicitColumns),
 			)
 			for _, c := range newPrimaryIdxKeyColumns[0:partitioning.NumImplicitColumns] {
@@ -651,7 +652,7 @@ func addSecondaryIndexTargetsForAddColumn(
 		numImplicitColumns = int(partitioning.NumImplicitColumns)
 	}
 	if indexName == "" {
-		indexName = getImplicitSecondaryIndexName(b, tbl, index.IndexID, numImplicitColumns)
+		indexName = getImplicitSecondaryIndexName(b, tbl.TableID, index.IndexID, numImplicitColumns)
 	}
 	b.Add(&scpb.IndexName{
 		TableID: tbl.TableID,

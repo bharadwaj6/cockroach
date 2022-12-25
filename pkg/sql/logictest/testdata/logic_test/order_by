@@ -348,7 +348,7 @@ SELECT * FROM kv AS a, kv AS b ORDER BY PRIMARY KEY kv
 # is a real table, not an alias.
 #
 statement error no data source matches prefix: test.public.kv
-SELECT k FROM (SELECT @1, @1 FROM generate_series(1,10)) AS kv(k,v) ORDER BY PRIMARY KEY kv
+SELECT k FROM (SELECT i, i FROM generate_series(1,10) g(i)) AS kv(k,v) ORDER BY PRIMARY KEY kv
 
 statement error no data source matches prefix: test.public.kv
 CREATE TABLE unrelated(x INT); SELECT * FROM unrelated ORDER BY PRIMARY KEY kv
@@ -572,3 +572,34 @@ NULL  6
 2     NULL
 2     5
 4     8
+
+# Using the session variable, we should get results that match Postgres.
+# TODO(#93558): This test case is broken and shows the limit of our
+# approach to using an optimizer-based approach for NULLS LAST.
+# Postgres returns:
+#      x   | y
+#   -------+---
+#    (1,1) | 1
+#    (1,)  | 3
+#    (,)   | 4
+#          | 2
+#
+query TI
+WITH t (x, y) AS (
+  VALUES
+    ((1, 1), 1),
+    ((NULL::RECORD), 2),
+    ((1, NULL::INT), 3),
+    ((NULL::INT, NULL::INT), 4)
+)
+SELECT *
+FROM t
+ORDER BY x;
+----
+(1,)   3
+(1,1)  1
+NULL   2
+(,)    4
+
+statement ok
+RESET null_ordered_last

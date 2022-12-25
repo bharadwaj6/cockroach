@@ -12,13 +12,20 @@ package kvnemesis
 
 import (
 	"context"
+	"fmt"
+	"math"
+	"math/rand"
 	"reflect"
+	"strings"
 	"time"
 
+	"github.com/cockroachdb/cockroach/pkg/keys"
 	"github.com/cockroachdb/cockroach/pkg/kv"
 	"github.com/cockroachdb/cockroach/pkg/kv/kvclient/kvcoord"
+	"github.com/cockroachdb/cockroach/pkg/kv/kvnemesis/kvnemesisutil"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/storage"
+	"github.com/cockroachdb/cockroach/pkg/storage/enginepb"
 	"github.com/cockroachdb/cockroach/pkg/util/ctxgroup"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
@@ -157,70 +164,182 @@ func (w *Watcher) processEvents(ctx context.Context, eventC chan kvcoord.RangeFe
 			case *roachpb.RangeFeedError:
 				return e.Error.GoError()
 			case *roachpb.RangeFeedValue:
-				log.Infof(ctx, `rangefeed Put %s %s -> %s (prev %s)`,
-					e.Key, e.Value.Timestamp, e.Value.PrettyPrint(), e.PrevValue.PrettyPrint())
-				w.mu.Lock()
-				// TODO(dan): If the exact key+ts is put into kvs more than once, the
-				// Engine will keep the last. This matches our txn semantics (if a key
-				// is written in a transaction more than once, only the last is kept)
-				// but it means that we'll won't catch it if we violate those semantics.
-				// Consider first doing a Get and somehow failing if this exact key+ts
-				// has previously been put with a different value.
-				if len(e.Value.RawBytes) == 0 {
-					w.mu.kvs.Delete(storage.MVCCKey{Key: e.Key, Timestamp: e.Value.Timestamp})
-				} else {
-					w.mu.kvs.Put(storage.MVCCKey{Key: e.Key, Timestamp: e.Value.Timestamp}, e.Value.RawBytes)
+				if err := w.handleValue(ctx, roachpb.Span{Key: e.Key}, e.Value, &e.PrevValue); err != nil {
+					return err
 				}
-				prevTs := e.Value.Timestamp.Prev()
-				prevValue := w.mu.kvs.Get(e.Key, prevTs)
-
-				// RangeFeed doesn't send the timestamps of the previous values back
-				// because changefeeds don't need them. It would likely be easy to
-				// implement, but would add unnecessary allocations in changefeeds,
-				// which don't need them. This means we'd want to make it an option in
-				// the request, which seems silly to do for only this test.
-				prevValue.Timestamp = hlc.Timestamp{}
-				// Additionally, ensure that deletion tombstones and missing keys are
-				// normalized as the nil slice, so that they can be matched properly
-				// between the RangeFeed and the Engine.
-				if len(e.PrevValue.RawBytes) == 0 {
-					e.PrevValue.RawBytes = nil
-				}
-				prevValueMismatch := !reflect.DeepEqual(prevValue, e.PrevValue)
-				var engineContents string
-				if prevValueMismatch {
-					engineContents = w.mu.kvs.DebugPrint("  ")
-				}
-				w.mu.Unlock()
-
-				if prevValueMismatch {
-					log.Infof(ctx, "rangefeed mismatch\n%s", engineContents)
-					panic(errors.Errorf(
-						`expected (%s, %s) previous value %s got: %s`, e.Key, prevTs, prevValue, e.PrevValue))
+			case *roachpb.RangeFeedDeleteRange:
+				if err := w.handleValue(ctx, e.Span, roachpb.Value{Timestamp: e.Timestamp}, nil /* prevV */); err != nil {
+					return err
 				}
 			case *roachpb.RangeFeedCheckpoint:
-				w.mu.Lock()
-				frontierAdvanced, err := w.mu.frontier.Forward(e.Span, e.ResolvedTS)
-				if err != nil {
-					panic(errors.Wrapf(err, "unexpected frontier error advancing to %s@%s", e.Span, e.ResolvedTS))
+				if err := w.handleCheckpoint(ctx, e.Span, e.ResolvedTS); err != nil {
+					return err
 				}
-				if frontierAdvanced {
-					frontier := w.mu.frontier.Frontier()
-					log.Infof(ctx, `watcher reached frontier %s lagging by %s`,
-						frontier, timeutil.Since(frontier.GoTime()))
-					for ts, chs := range w.mu.frontierWaiters {
-						if frontier.Less(ts) {
-							continue
-						}
-						log.Infof(ctx, `watcher notifying %s`, ts)
-						delete(w.mu.frontierWaiters, ts)
-						for _, ch := range chs {
-							ch <- nil
-						}
-					}
+			case *roachpb.RangeFeedSSTable:
+				if err := w.handleSSTable(ctx, e.Data); err != nil {
+					return err
 				}
-				w.mu.Unlock()
+			default:
+				return errors.Errorf("unknown event: %T", e)
 			}
 		}
 	}
+}
+
+func (w *Watcher) handleValue(
+	ctx context.Context, span roachpb.Span, v roachpb.Value, prevV *roachpb.Value,
+) error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.handleValueLocked(ctx, span, v, prevV)
+}
+
+func (w *Watcher) handleValueLocked(
+	ctx context.Context, span roachpb.Span, v roachpb.Value, prevV *roachpb.Value,
+) error {
+	var buf strings.Builder
+	fmt.Fprintf(&buf, `rangefeed %s %s -> %s`, span, v.Timestamp, v.PrettyPrint())
+	if prevV != nil {
+		fmt.Fprintf(&buf, ` (prev %s)`, prevV.PrettyPrint())
+	}
+	// TODO(dan): If the exact key+ts is put into kvs more than once, the
+	// Engine will keep the last. This matches our txn semantics (if a key
+	// is written in a transaction more than once, only the last is kept)
+	// but it means that we'll won't catch it if we violate those semantics.
+	// Consider first doing a Get and somehow failing if this exact key+ts
+	// has previously been put with a different value.
+	if len(span.EndKey) > 0 {
+		// If we have two operations that are not atomic (i.e. aren't in a batch)
+		// and they produce touching tombstones at the same timestamp, then
+		// `.mu.kvs` will merge them but they wouldn't be merged in pebble, since
+		// their MVCCValueHeader will contain different seqnos (and thus the value
+		// isn't identical). To work around that, we put random stuff in here. This
+		// is never interpreted - the seqno is only pulled out via an interceptor at
+		// the rangefeed boundary, and handed to the tracker. This is merely our
+		// local copy.
+		//
+		// See https://github.com/cockroachdb/cockroach/issues/92822.
+		var vh enginepb.MVCCValueHeader
+		vh.KVNemesisSeq.Set(kvnemesisutil.Seq(rand.Int63n(math.MaxUint32)))
+		mvccV := storage.MVCCValue{
+			MVCCValueHeader: vh,
+		}
+
+		sl, err := storage.EncodeMVCCValue(mvccV)
+		if err != nil {
+			return err
+		}
+
+		w.mu.kvs.DeleteRange(span.Key, span.EndKey, v.Timestamp, sl)
+		return nil
+	}
+
+	// Handle a point write.
+	w.mu.kvs.Put(storage.MVCCKey{Key: span.Key, Timestamp: v.Timestamp}, v.RawBytes)
+	if prevV != nil {
+		prevTs := v.Timestamp.Prev()
+		getPrevV := w.mu.kvs.Get(span.Key, prevTs)
+
+		// RangeFeed doesn't send the timestamps of the previous values back
+		// because changefeeds don't need them. It would likely be easy to
+		// implement, but would add unnecessary allocations in changefeeds,
+		// which don't need them. This means we'd want to make it an option in
+		// the request, which seems silly to do for only this test.
+		getPrevV.Timestamp = hlc.Timestamp{}
+		// Additionally, ensure that deletion tombstones and missing keys are
+		// normalized as the nil slice, so that they can be matched properly
+		// between the RangeFeed and the Engine.
+		if len(prevV.RawBytes) == 0 {
+			prevV.RawBytes = nil
+		}
+		prevValueMismatch := !reflect.DeepEqual(prevV, &getPrevV)
+		var engineContents string
+		if prevValueMismatch {
+			engineContents = w.mu.kvs.DebugPrint("  ")
+		}
+
+		if prevValueMismatch {
+			log.Infof(ctx, "rangefeed mismatch\n%s", engineContents)
+			s := mustGetStringValue(getPrevV.RawBytes)
+			fmt.Println(s)
+			return errors.Errorf(
+				`expected (%s, %s) has previous value %s in kvs, but rangefeed has: %s`,
+				span, prevTs, mustGetStringValue(getPrevV.RawBytes), mustGetStringValue(prevV.RawBytes))
+		}
+	}
+	return nil
+}
+
+func (w *Watcher) handleCheckpoint(
+	ctx context.Context, span roachpb.Span, resolvedTS hlc.Timestamp,
+) error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	frontierAdvanced, err := w.mu.frontier.Forward(span, resolvedTS)
+	if err != nil {
+		return errors.Wrapf(err, "unexpected frontier error advancing to %s@%s", span, resolvedTS)
+	}
+	if frontierAdvanced {
+		frontier := w.mu.frontier.Frontier()
+		log.Infof(ctx, `watcher reached frontier %s lagging by %s`,
+			frontier, timeutil.Since(frontier.GoTime()))
+		for ts, chs := range w.mu.frontierWaiters {
+			if frontier.Less(ts) {
+				continue
+			}
+			log.Infof(ctx, `watcher notifying %s`, ts)
+			delete(w.mu.frontierWaiters, ts)
+			for _, ch := range chs {
+				ch <- nil
+			}
+		}
+	}
+	return nil
+}
+
+func (w *Watcher) handleSSTable(ctx context.Context, data []byte) error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	if len(data) == 0 {
+		return errors.AssertionFailedf("no SST data found")
+	}
+
+	// TODO(erikgrinaker): This should handle range keys too.
+	iter, err := storage.NewMemSSTIterator(data, false /* verify */, storage.IterOptions{
+		KeyTypes:   storage.IterKeyTypePointsOnly,
+		LowerBound: keys.MinKey,
+		UpperBound: keys.MaxKey,
+	})
+	if err != nil {
+		return err
+	}
+	defer iter.Close()
+	for iter.SeekGE(storage.MVCCKey{Key: keys.MinKey}); ; iter.Next() {
+		if ok, err := iter.Valid(); err != nil {
+			return err
+		} else if !ok {
+			break
+		}
+		key := iter.Key()
+		rawValue, err := iter.Value()
+		if err != nil {
+			return err
+		}
+		mvccValue, err := storage.DecodeMVCCValue(rawValue)
+		if err != nil {
+			return err
+		}
+		mvccValue.Value.Timestamp = key.Timestamp
+		if seq := mvccValue.KVNemesisSeq.Get(); seq > 0 {
+			w.env.Tracker.Add(key.Key, nil, key.Timestamp, seq)
+		}
+		if err := w.handleValueLocked(ctx, roachpb.Span{Key: key.Key}, mvccValue.Value, nil); err != nil {
+			return err
+		}
+		log.Infof(ctx, `rangefeed AddSSTable %s %s -> %s`,
+			key.Key, key.Timestamp, mvccValue.Value.PrettyPrint())
+	}
+	return nil
 }

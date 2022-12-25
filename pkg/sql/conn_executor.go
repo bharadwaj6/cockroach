@@ -41,7 +41,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/execstats"
 	"github.com/cockroachdb/cockroach/pkg/sql/idxrecommendations"
 	"github.com/cockroachdb/cockroach/pkg/sql/idxusage"
-	"github.com/cockroachdb/cockroach/pkg/sql/parser"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgcode"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgerror"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgwirecancel"
@@ -74,6 +73,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/stop"
 	"github.com/cockroachdb/cockroach/pkg/util/syncutil"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
+	"github.com/cockroachdb/cockroach/pkg/util/tochar"
 	"github.com/cockroachdb/errors"
 	"github.com/cockroachdb/logtags"
 	"golang.org/x/net/trace"
@@ -287,7 +287,8 @@ type Server struct {
 
 	insights insights.Provider
 
-	reCache *tree.RegexpCache
+	reCache           *tree.RegexpCache
+	toCharFormatCache *tochar.FormatCache
 
 	// pool is the parent monitor for all session monitors.
 	pool *mon.BytesMonitor
@@ -396,6 +397,7 @@ func NewServer(cfg *ExecutorConfig, pool *mon.BytesMonitor) *Server {
 		reportedStatsController: reportedSQLStatsController,
 		insights:                insightsProvider,
 		reCache:                 tree.NewRegexpCache(512),
+		toCharFormatCache:       tochar.NewFormatCache(512),
 		indexUsageStats: idxusage.NewLocalIndexUsageStats(&idxusage.Config{
 			ChannelSize: idxusage.DefaultChannelSize,
 			Setting:     cfg.Settings,
@@ -574,6 +576,31 @@ func (s *Server) GetReportedSQLStatsController() *sslocal.Controller {
 // GetTxnIDCache returns the txnidcache.Cache for the current sql.Server.
 func (s *Server) GetTxnIDCache() *txnidcache.Cache {
 	return s.txnIDCache
+}
+
+// addToRecentStatementsCache adds a completed statement to the
+// RecentStatementsCache on the Server ExecutorConfig.
+func (s *Server) addToRecentStatementsCache(
+	ctx context.Context,
+	sessionID clusterunique.ID,
+	appName atomic.Value,
+	username string,
+	clientAddr string,
+	queryID clusterunique.ID,
+	qm *queryMeta,
+	timeNow time.Time,
+) {
+	activeQuery, err := qm.toActiveQuery(ctx, queryID, sessionID, appName, username, clientAddr, timeNow)
+	if err != nil {
+		// We can't just log the SQL as it could contain sensitive information.
+		log.Warningf(ctx, "failed to re-parse sql while adding to recent statements cache")
+		return
+	}
+	err = s.cfg.RecentStatementsCache.Add(ctx, activeQuery)
+	if err != nil {
+		log.Warningf(ctx, "could not add to recent statements cache due to memory allocation error")
+		return
+	}
 }
 
 // GetScrubbedStmtStats returns the statement statistics by app, with the
@@ -1699,6 +1726,7 @@ func (ns *prepStmtNamespace) resetTo(
 // transaction event, resetExtraTxnState invokes corresponding callbacks
 // (e.g. onTxnFinish() and onTxnRestart()).
 func (ex *connExecutor) resetExtraTxnState(ctx context.Context, ev txnEvent) {
+	ex.extraTxnState.numDDL = 0
 	ex.extraTxnState.firstStmtExecuted = false
 	ex.extraTxnState.hasAdminRoleCache = HasAdminRoleCache{}
 
@@ -2800,6 +2828,7 @@ func (ex *connExecutor) initEvalCtx(ctx context.Context, evalCtx *extendedEvalCo
 			PreparedStatementState:         &ex.extraTxnState.prepStmtsNamespace,
 			SessionDataStack:               ex.sessionDataStack,
 			ReCache:                        ex.server.reCache,
+			ToCharFormatCache:              ex.server.toCharFormatCache,
 			SQLStatsController:             ex.server.sqlStatsController,
 			SchemaTelemetryController:      ex.server.schemaTelemetryController,
 			IndexUsageStatsController:      ex.server.indexUsageStatsController,
@@ -3218,54 +3247,32 @@ func (ex *connExecutor) serialize() serverpb.Session {
 		return sql
 	}
 
+	// We always use base here as the fields from the SessionData should always
+	// be that of the root session.
+	sd := ex.sessionDataStack.Base()
+
+	remoteStr := "<admin>"
+	if sd.RemoteAddr != nil {
+		remoteStr = sd.RemoteAddr.String()
+	}
+	userName := sd.SessionUser().Normalized()
+
 	for id, query := range ex.mu.ActiveQueries {
 		if query.hidden {
 			continue
 		}
-		// Note: while it may seem tempting to just use query.stmt.AST instead of
-		// re-parsing the original SQL, it's unfortunately NOT SAFE to do so because
-		// the AST is currently not immutable - doing so will produce data races.
-		// See issue https://github.com/cockroachdb/cockroach/issues/90965 for the
-		// last time this was hit.
-		// This can go away if we resolve https://github.com/cockroachdb/cockroach/issues/22847.
-		parsed, err := parser.ParseOne(query.stmt.SQL)
+
+		activeQuery, err := query.toActiveQuery(ex.Ctx(), id, ex.sessionID, ex.applicationName, userName, remoteStr, timeNow)
 		if err != nil {
 			// This shouldn't happen, but might as well not completely give up if we
-			// fail to parse a parseable sql for some reason. We unfortunately can't
-			// just log the SQL either as it could contain sensitive information.
-			log.Warningf(ex.Ctx(), "failed to re-parse sql during session "+
-				"serialization")
+			// fail to parse a parseable sql for some reason.
+			// We can't just log the SQL as it could contain sensitive information.
+			log.Warningf(ex.Ctx(), "failed to re-parse sql during session serialization")
 			continue
 		}
-		sqlNoConstants := truncateSQL(formatStatementHideConstants(parsed.AST))
-		nPlaceholders := 0
-		if query.placeholders != nil {
-			nPlaceholders = len(query.placeholders.Values)
-		}
-		placeholders := make([]string, nPlaceholders)
-		for i := range placeholders {
-			placeholders[i] = tree.AsStringWithFlags(query.placeholders.Values[i], tree.FmtSimple)
-		}
-		sql := truncateSQL(query.stmt.SQL)
-		progress := math.Float64frombits(atomic.LoadUint64(&query.progressAtomic))
-		queryStart := query.start.UTC()
-		activeQueries = append(activeQueries, serverpb.ActiveQuery{
-			TxnID:          query.txnID,
-			ID:             id.String(),
-			Start:          queryStart,
-			ElapsedTime:    timeNow.Sub(queryStart),
-			Sql:            sql,
-			SqlNoConstants: sqlNoConstants,
-			SqlSummary:     formatStatementSummary(parsed.AST),
-			Placeholders:   placeholders,
-			IsDistributed:  query.isDistributed,
-			Phase:          (serverpb.ActiveQuery_Phase)(query.phase),
-			Progress:       float32(progress),
-			IsFullScan:     query.isFullScan,
-			PlanGist:       query.planGist,
-			Database:       query.database,
-		})
+		activeQueries = append(activeQueries, activeQuery)
 	}
+
 	lastActiveQuery := ""
 	lastActiveQueryNoConstants := ""
 	if ex.mu.LastActiveQuery != nil {
@@ -3277,15 +3284,6 @@ func (ex *connExecutor) serialize() serverpb.Session {
 		status = serverpb.Session_ACTIVE
 	}
 
-	// We always use base here as the fields from the SessionData should always
-	// be that of the root session.
-	sd := ex.sessionDataStack.Base()
-
-	remoteStr := "<admin>"
-	if sd.RemoteAddr != nil {
-		remoteStr = sd.RemoteAddr.String()
-	}
-
 	txnFingerprintIDs := ex.txnFingerprintIDCache.GetAllTxnFingerprintIDs()
 	sessionActiveTime := ex.totalActiveTimeStopWatch.Elapsed()
 	if startedAt, started := ex.totalActiveTimeStopWatch.LastStartedAt(); started {
@@ -3293,7 +3291,7 @@ func (ex *connExecutor) serialize() serverpb.Session {
 	}
 
 	return serverpb.Session{
-		Username:                   sd.SessionUser().Normalized(),
+		Username:                   userName,
 		ClientAddress:              remoteStr,
 		ApplicationName:            ex.applicationName.Load().(string),
 		Start:                      ex.phaseTimes.GetSessionPhaseTime(sessionphase.SessionInit).UTC(),

@@ -145,7 +145,7 @@ type hashJoinerSourceSpec struct {
 //     - Update the differs array to store whether or not the probe's key tuple
 //     matched the corresponding build's key tuple.
 //     - For the indices that did not differ, we can lazily update the HashTable's
-//     same linked list to store a list of all identical keys starting at head.
+//     Same linked list to store a list of all identical keys starting at head.
 //     Once a key has been added to ht.Same, ht.Visited is set to true. For the
 //     indices that have never been visited, we want to continue checking this
 //     bucket for identical values by adding this key to ToCheck.
@@ -168,7 +168,7 @@ type hashJoinerSourceSpec struct {
 // all build table rows that have never been matched and stitching it together
 // with NULL values on the probe side.
 type hashJoiner struct {
-	*joinHelper
+	colexecop.TwoInputInitHelper
 
 	// hashTableAllocator should be used when building the hash table from the
 	// right input.
@@ -254,7 +254,7 @@ var _ colexecop.Resetter = &hashJoiner{}
 const HashJoinerInitialNumBuckets = 256
 
 func (hj *hashJoiner) Init(ctx context.Context) {
-	if !hj.init(ctx) {
+	if !hj.TwoInputInitHelper.Init(ctx) {
 		return
 	}
 
@@ -326,24 +326,30 @@ func (hj *hashJoiner) Next() coldata.Batch {
 }
 
 func (hj *hashJoiner) build() {
-	hj.ht.FullBuild(hj.inputTwo)
+	hj.ht.FullBuild(hj.InputTwo)
 
-	// We might have duplicates in the hash table, so we need to set up
-	// same and visited slices for the prober.
-	if !hj.spec.rightDistinct && !hj.spec.JoinType.IsLeftAntiOrExceptAll() {
-		// We don't need same with LEFT ANTI and EXCEPT ALL joins because
-		// they have separate collectLeftAnti method.
-		hj.ht.Same = colexecutils.MaybeAllocateUint64Array(hj.ht.Same, hj.ht.Vals.Length()+1)
-		// At this point, we have fully built the hash table on the right side
-		// (meaning we have fully consumed the right input), so it'd be a shame
-		// to fallback to disk, thus, we use the unlimited allocator.
-		newAccountedFor := memsize.Uint64 * int64(cap(hj.ht.Same))
-		// hj.ht.Same will never shrink, so the delta is non-negative.
-		hj.outputUnlimitedAllocator.AdjustMemoryUsageAfterAllocation(newAccountedFor - hj.accountedFor.hashtableSame)
-		hj.accountedFor.hashtableSame = newAccountedFor
+	// If we might have duplicates in the hash table (meaning that rightDistinct
+	// is false), we need to set up Same and Visited slices for the prober
+	// (depending on the join type).
+	if !hj.spec.rightDistinct {
+		switch hj.spec.JoinType {
+		case descpb.LeftAntiJoin, descpb.ExceptAllJoin, descpb.IntersectAllJoin:
+		default:
+			// We don't need Same with LEFT ANTI, EXCEPT ALL, and INTERSECT ALL
+			// joins because they have a separate collectSingleMatch method.
+			hj.ht.Same = colexecutils.MaybeAllocateUint64Array(hj.ht.Same, hj.ht.Vals.Length()+1)
+			// At this point, we have fully built the hash table on the right
+			// side (meaning we have fully consumed the right input), so it'd be
+			// a shame to fallback to disk, thus, we use the unlimited
+			// allocator.
+			newAccountedFor := memsize.Uint64 * int64(cap(hj.ht.Same))
+			// hj.ht.Same will never shrink, so the delta is non-negative.
+			hj.outputUnlimitedAllocator.AdjustMemoryUsageAfterAllocation(newAccountedFor - hj.accountedFor.hashtableSame)
+			hj.accountedFor.hashtableSame = newAccountedFor
+		}
 	}
 	if !hj.spec.rightDistinct || hj.spec.JoinType.IsSetOpJoin() {
-		// visited slice is also used for set-operation joins, regardless of
+		// Visited slice is also used for set-operation joins, regardless of
 		// the fact whether the right side is distinct.
 		hj.ht.Visited = colexecutils.MaybeAllocateBoolArray(hj.ht.Visited, hj.ht.Vals.Length()+1)
 		// At this point, we have fully built the hash table on the right side
@@ -451,9 +457,9 @@ func (hj *hashJoiner) prepareForCollecting(batchSize int) {
 	} else {
 		hj.probeState.probeIdx = hj.probeState.probeIdx[:batchSize]
 	}
-	if hj.spec.JoinType.IsLeftAntiOrExceptAll() {
-		// Left anti and except all joins have special collectLeftAnti method
-		// that only uses probeIdx slice.
+	if hj.spec.JoinType.IsLeftAntiOrExceptAll() || hj.spec.JoinType == descpb.IntersectAllJoin {
+		// Left anti, except all, and intersect all joins have special
+		// collectSingleMatch method that only uses the probeIdx slice.
 		return
 	}
 	if hj.spec.JoinType.IsLeftOuterOrFullOuter() {
@@ -496,7 +502,7 @@ func (hj *hashJoiner) exec() coldata.Batch {
 		// There were no matches in that batch, so we move on to the next one.
 	}
 	for {
-		batch := hj.inputOne.Next()
+		batch := hj.InputOne.Next()
 		batchSize := batch.Length()
 
 		if batchSize == 0 {
@@ -693,12 +699,12 @@ func (hj *hashJoiner) congregate(nResults int, batch coldata.Batch) {
 }
 
 func (hj *hashJoiner) ExportBuffered(input colexecop.Operator) coldata.Batch {
-	if hj.inputOne == input {
+	if hj.InputOne == input {
 		// We do not buffer anything from the left source. Furthermore, the memory
 		// limit can only hit during the building of the hash table step at which
 		// point we haven't requested a single batch from the left.
 		return coldata.ZeroBatch
-	} else if hj.inputTwo == input {
+	} else if hj.InputTwo == input {
 		if hj.exportBufferedState.hashTableReleased {
 			return coldata.ZeroBatch
 		}
@@ -758,11 +764,7 @@ func (hj *hashJoiner) resetOutput(nResults int) {
 }
 
 func (hj *hashJoiner) Reset(ctx context.Context) {
-	for _, input := range []colexecop.Operator{hj.inputOne, hj.inputTwo} {
-		if r, ok := input.(colexecop.Resetter); ok {
-			r.Reset(ctx)
-		}
-	}
+	hj.TwoInputInitHelper.Reset(ctx)
 	hj.state = hjBuilding
 	// Note that hj.ht.Reset() doesn't reset hj.ht.Same and hj.ht.Visited
 	// slices, but we'll reset them manually in hj.build(). We also keep
@@ -849,24 +851,29 @@ func MakeHashJoinerSpec(
 	}
 }
 
+// NewHashJoinerArgs encompasses all arguments to NewHashJoiner call.
+type NewHashJoinerArgs struct {
+	BuildSideAllocator       *colmem.Allocator
+	OutputUnlimitedAllocator *colmem.Allocator
+	Spec                     HashJoinerSpec
+	LeftSource               colexecop.Operator
+	RightSource              colexecop.Operator
+	InitialNumBuckets        uint64
+}
+
 // NewHashJoiner creates a new equality hash join operator on the left and
 // right input tables.
 // hashTableAllocator should use a limited memory account and will be used for
 // the build side whereas outputUnlimitedAllocator should use an unlimited
 // memory account and will only be used when populating the output.
 // memoryLimit will limit the size of the batches produced by the hash joiner.
-func NewHashJoiner(
-	buildSideAllocator, outputUnlimitedAllocator *colmem.Allocator,
-	spec HashJoinerSpec,
-	leftSource, rightSource colexecop.Operator,
-	initialNumBuckets uint64,
-) colexecop.ResettableOperator {
+func NewHashJoiner(args NewHashJoinerArgs) colexecop.ResettableOperator {
 	return &hashJoiner{
-		joinHelper:                 newJoinHelper(leftSource, rightSource),
-		hashTableAllocator:         buildSideAllocator,
-		outputUnlimitedAllocator:   outputUnlimitedAllocator,
-		spec:                       spec,
-		outputTypes:                spec.JoinType.MakeOutputTypes(spec.Left.SourceTypes, spec.Right.SourceTypes),
-		hashTableInitialNumBuckets: initialNumBuckets,
+		TwoInputInitHelper:         colexecop.MakeTwoInputInitHelper(args.LeftSource, args.RightSource),
+		hashTableAllocator:         args.BuildSideAllocator,
+		outputUnlimitedAllocator:   args.OutputUnlimitedAllocator,
+		spec:                       args.Spec,
+		outputTypes:                args.Spec.JoinType.MakeOutputTypes(args.Spec.Left.SourceTypes, args.Spec.Right.SourceTypes),
+		hashTableInitialNumBuckets: args.InitialNumBuckets,
 	}
 }

@@ -22,7 +22,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
 	"github.com/cockroachdb/cockroach/pkg/sql"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog"
-	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catpb"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catenumpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descs"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/lease"
@@ -183,8 +183,8 @@ CREATE TABLE db.t (
 		KeyColumnIDs:      []descpb.ColumnID{1},
 		KeyColumnNames:    []string{"i"},
 		StoreColumnNames:  []string{},
-		KeyColumnDirections: []catpb.IndexColumn_Direction{
-			catpb.IndexColumn_ASC,
+		KeyColumnDirections: []catenumpb.IndexColumn_Direction{
+			catenumpb.IndexColumn_ASC,
 		},
 		ConstraintID:                3,
 		UseDeletePreservingEncoding: true,
@@ -222,7 +222,7 @@ CREATE TABLE db.t (
 						ColumnID:  1,
 						IndexID:   indexToAdd.ID,
 						Kind:      scpb.IndexColumn_KEY,
-						Direction: catpb.IndexColumn_ASC,
+						Direction: catenumpb.IndexColumn_ASC,
 						Ordinal:   0,
 					},
 				}
@@ -487,6 +487,7 @@ func (noopValidator) ValidateCheckConstraint(
 	ctx context.Context,
 	tbl catalog.TableDescriptor,
 	constraint catalog.CheckConstraint,
+	indexIDForValidation descpb.IndexID,
 	override sessiondata.InternalExecutorOverride,
 ) error {
 	return nil

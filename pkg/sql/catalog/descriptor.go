@@ -15,10 +15,12 @@ import (
 
 	"github.com/cockroachdb/cockroach/pkg/keys"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catenumpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgcode"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgerror"
+	"github.com/cockroachdb/cockroach/pkg/sql/privilege"
 	"github.com/cockroachdb/cockroach/pkg/sql/schemachanger/scpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
@@ -159,7 +161,7 @@ type LeasableDescriptor interface {
 type Descriptor interface {
 	NameEntry
 	LeasableDescriptor
-	PrivilegeObject
+	privilege.Object
 
 	// GetPrivileges returns this descriptor's PrivilegeDescriptor, which
 	// describes the set of privileges that users have to use, modify, or delete
@@ -514,7 +516,7 @@ type TableDescriptor interface {
 	IndexKeyColumns(idx Index) []Column
 	// IndexKeyColumnDirections returns a slice of column directions for all
 	// key columns in the specified Index.
-	IndexKeyColumnDirections(idx Index) []catpb.IndexColumn_Direction
+	IndexKeyColumnDirections(idx Index) []catenumpb.IndexColumn_Direction
 	// IndexKeySuffixColumns returns a slice of Column interfaces containing all
 	// key suffix columns in the specified Index.
 	IndexKeySuffixColumns(idx Index) []Column
@@ -525,7 +527,7 @@ type TableDescriptor interface {
 	// IndexFullColumnDirections returns a slice of column directions for all
 	// key columns in the specified Index, plus all key suffix columns if that
 	// index is not a unique index.
-	IndexFullColumnDirections(idx Index) []catpb.IndexColumn_Direction
+	IndexFullColumnDirections(idx Index) []catenumpb.IndexColumn_Direction
 	// IndexStoredColumns returns a slice of Column interfaces containing all
 	// stored columns in the specified Index.
 	IndexStoredColumns(idx Index) []Column

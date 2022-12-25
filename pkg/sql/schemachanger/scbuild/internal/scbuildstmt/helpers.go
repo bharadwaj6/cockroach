@@ -15,7 +15,7 @@ import (
 	"sort"
 
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog"
-	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catpb"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catenumpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgcode"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgerror"
 	"github.com/cockroachdb/cockroach/pkg/sql/privilege"
@@ -292,6 +292,38 @@ func getSortedColumnIDsInIndex(
 	return keyColumnIDs, keySuffixColumnIDs, storingColumnIDs
 }
 
+// getNonDropColumnIDs returns all non-drop columns in a table.
+func getNonDropColumns(b BuildCtx, tableID catid.DescID) (ret []*scpb.Column) {
+	scpb.ForEachColumn(b.QueryByID(tableID).Filter(publicTargetFilter), func(
+		_ scpb.Status, _ scpb.TargetStatus, e *scpb.Column,
+	) {
+		ret = append(ret, e)
+	})
+	return ret
+}
+
+// getColumnIDFromColumnName looks up a column's ID by its name.
+// If no column with this name exists, 0 will be returned.
+func getColumnIDFromColumnName(
+	b BuilderState, tableID catid.DescID, columnName tree.Name,
+) catid.ColumnID {
+	colElems := b.ResolveColumn(tableID, columnName, ResolveParams{
+		IsExistenceOptional: true,
+		RequiredPrivilege:   privilege.CREATE,
+	})
+
+	if colElems == nil {
+		// no column with this name was found
+		return 0
+	}
+
+	_, _, colElem := scpb.FindColumn(colElems)
+	if colElem == nil {
+		panic(errors.AssertionFailedf("programming error: cannot find a Column element for column %v", columnName))
+	}
+	return colElem.ColumnID
+}
+
 func toPublicNotCurrentlyPublicFilter(
 	status scpb.Status, target scpb.TargetStatus, _ scpb.Element,
 ) bool {
@@ -381,13 +413,13 @@ func getPrimaryIndexes(
 	return existing, freshlyAdded
 }
 
-// indexColumnDirection converts tree.Direction to catpb.IndexColumn_Direction.
-func indexColumnDirection(d tree.Direction) catpb.IndexColumn_Direction {
+// indexColumnDirection converts tree.Direction to catenumpb.IndexColumn_Direction.
+func indexColumnDirection(d tree.Direction) catenumpb.IndexColumn_Direction {
 	switch d {
 	case tree.DefaultDirection, tree.Ascending:
-		return catpb.IndexColumn_ASC
+		return catenumpb.IndexColumn_ASC
 	case tree.Descending:
-		return catpb.IndexColumn_DESC
+		return catenumpb.IndexColumn_DESC
 	default:
 		panic(errors.AssertionFailedf("unknown direction %s", d))
 	}
@@ -574,7 +606,7 @@ func makeTempIndexSpec(src indexSpec) indexSpec {
 type indexColumnSpec struct {
 	columnID  catid.ColumnID
 	kind      scpb.IndexColumn_Kind
-	direction catpb.IndexColumn_Direction
+	direction catenumpb.IndexColumn_Direction
 }
 
 func makeIndexColumnSpec(ic *scpb.IndexColumn) indexColumnSpec {
@@ -702,4 +734,38 @@ func fallBackIfVirtualColumnWithNotNullConstraint(t *tree.AlterTableAddColumn) {
 		panic(scerrors.NotImplementedErrorf(t,
 			"virtual column with NOT NULL constraint is not supported"))
 	}
+}
+
+// ExtractColumnIDsInExpr extracts column IDs used in expr. It's similar to
+// schemaexpr.ExtractColumnIDs but this function can also extract columns
+// added in the same transaction (e.g. for `ADD COLUMN j INT CHECK (j > 0);`,
+// schemaexpr.ExtractColumnIDs will err with "column j does not exist", but
+// this function can successfully retrieve the ID of column j from the builder state).
+func ExtractColumnIDsInExpr(
+	b BuilderState, tableID catid.DescID, expr tree.Expr,
+) (catalog.TableColSet, error) {
+	var colIDs catalog.TableColSet
+
+	_, err := tree.SimpleVisit(expr, func(expr tree.Expr) (recurse bool, newExpr tree.Expr, err error) {
+		vBase, ok := expr.(tree.VarName)
+		if !ok {
+			return true, expr, nil
+		}
+
+		v, err := vBase.NormalizeVarName()
+		if err != nil {
+			return false, nil, err
+		}
+
+		c, ok := v.(*tree.ColumnItem)
+		if !ok {
+			return true, expr, nil
+		}
+
+		colID := getColumnIDFromColumnName(b, tableID, c.ColumnName)
+		colIDs.Add(colID)
+		return false, expr, nil
+	})
+
+	return colIDs, err
 }

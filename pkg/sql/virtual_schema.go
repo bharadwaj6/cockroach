@@ -42,6 +42,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/sqltelemetry"
 	"github.com/cockroachdb/cockroach/pkg/util/errorutil/unimplemented"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
+	"github.com/cockroachdb/cockroach/pkg/util/iterutil"
 	"github.com/cockroachdb/cockroach/pkg/util/stop"
 	"github.com/cockroachdb/errors"
 )
@@ -131,6 +132,10 @@ type virtualSchemaTable struct {
 	// will be queryable but return no rows. Otherwise querying the table will
 	// return an unimplemented error.
 	unimplemented bool
+
+	// resultColumns is optional; if present, it will be checked for coherency
+	// with schema.
+	resultColumns colinfo.ResultColumns
 }
 
 // virtualSchemaView represents a view within a virtualSchema
@@ -196,15 +201,38 @@ func (t virtualSchemaTable) initVirtualTableDesc(
 			privilege.List{},
 			username.NodeUserName(),
 		),
-		nil,                        /* affected */
-		&semaCtx,                   /* semaCtx */
-		nil,                        /* evalCtx */
-		&sessiondata.SessionData{}, /* sessionData */
+		nil,      /* affected */
+		&semaCtx, /* semaCtx */
+		// We explicitly pass in a half-baked EvalContext because we don't need to
+		// evaluate any expressions to initialize virtual tables. We do need to
+		// pass in the cluster settings to make sure that functions can properly
+		// evaluate version gates, though.
+		&eval.Context{Settings: st}, /* evalCtx */
+		&sessiondata.SessionData{},  /* sessionData */
 		tree.PersistencePermanent,
 	)
 	if err != nil {
 		err = errors.Wrapf(err, "initVirtualDesc problem with schema: \n%s", t.schema)
 		return descpb.TableDescriptor{}, err
+	}
+
+	if t.resultColumns != nil {
+		if len(mutDesc.Columns) != len(t.resultColumns) {
+			return descpb.TableDescriptor{}, errors.AssertionFailedf(
+				"virtual table %s.%s declares incorrect number of columns: %d vs %d",
+				sc.GetName(), mutDesc.GetName(),
+				len(mutDesc.Columns), len(t.resultColumns))
+		}
+		for i := range mutDesc.Columns {
+			if mutDesc.Columns[i].Name != t.resultColumns[i].Name ||
+				mutDesc.Columns[i].Hidden != t.resultColumns[i].Hidden ||
+				mutDesc.Columns[i].Type.String() != t.resultColumns[i].Typ.String() {
+				return descpb.TableDescriptor{}, errors.AssertionFailedf(
+					"virtual table %s.%s declares incorrect column metadata: %#v vs %#v",
+					sc.GetName(), mutDesc.GetName(),
+					mutDesc.Columns[i], t.resultColumns[i])
+			}
+		}
 	}
 
 	if t.generator != nil {
@@ -323,7 +351,11 @@ func (v virtualSchemaView) initVirtualTableDesc(
 			username.NodeUserName(),
 		),
 		nil, // semaCtx
-		nil, // evalCtx
+		// We explicitly pass in a half-baked EvalContext because we don't need to
+		// evaluate any expressions to initialize virtual tables. We do need to
+		// pass in the cluster settings to make sure that functions can properly
+		// evaluate version gates, though.
+		&eval.Context{Settings: st}, /* evalCtx */
 		st,
 		tree.PersistencePermanent,
 		false, // isMultiRegion
@@ -395,6 +427,21 @@ func (vs *VirtualSchemaHolder) GetVirtualObjectByID(id descpb.ID) (catalog.Virtu
 		return nil, false
 	}
 	return entry, true
+}
+
+// Visit makes VirtualSchemaHolder implement catalog.VirtualSchemas.
+func (vs *VirtualSchemaHolder) Visit(fn func(desc catalog.Descriptor, comment string) error) error {
+	for _, sc := range vs.schemasByID {
+		if err := fn(sc.desc, "" /* comment */); err != nil {
+			return iterutil.Map(err)
+		}
+		for _, def := range sc.defs {
+			if err := fn(def.desc, def.comment); err != nil {
+				return iterutil.Map(err)
+			}
+		}
+	}
+	return nil
 }
 
 var _ catalog.VirtualSchemas = (*VirtualSchemaHolder)(nil)

@@ -228,6 +228,13 @@ func TestExecBuild_geospatial(
 	runExecBuildLogicTest(t, "geospatial")
 }
 
+func TestExecBuild_group_join(
+	t *testing.T,
+) {
+	defer leaktest.AfterTest(t)()
+	runExecBuildLogicTest(t, "group_join")
+}
+
 func TestExecBuild_hash_sharded_index(
 	t *testing.T,
 ) {
@@ -394,6 +401,13 @@ func TestExecBuild_partial_index(
 ) {
 	defer leaktest.AfterTest(t)()
 	runExecBuildLogicTest(t, "partial_index")
+}
+
+func TestExecBuild_partial_stats(
+	t *testing.T,
+) {
+	defer leaktest.AfterTest(t)()
+	runExecBuildLogicTest(t, "partial_stats")
 }
 
 func TestExecBuild_prepare(

@@ -352,6 +352,15 @@ func (b *Builder) buildScalar(
 		out = b.factory.ConstructCase(input, whens, orElse)
 
 	case *tree.IndexedVar:
+		// TODO(mgartner): Disallow ordinal column references completely in
+		// v23.2.
+		if !b.evalCtx.SessionData().AllowOrdinalColumnReferences {
+			panic(errors.WithHintf(
+				pgerror.Newf(pgcode.WarningDeprecatedFeature, "invalid syntax @%d", t.Idx+1),
+				"ordinal column references have been deprecated. "+
+					"Use `SET allow_ordinal_column_references=true` to allow them",
+			))
+		}
 		if t.Idx < 0 || t.Idx >= len(inScope.cols) {
 			panic(pgerror.Newf(pgcode.UndefinedColumn,
 				"invalid column ordinal: @%d", t.Idx+1))
@@ -539,7 +548,7 @@ func (b *Builder) buildFunction(
 	}
 
 	overload := f.ResolvedOverload()
-	if overload.Body != "" {
+	if overload.IsUDF {
 		return b.buildUDF(f, def, inScope, outScope, outCol, colRefs)
 	}
 
@@ -694,7 +703,7 @@ func (b *Builder) buildUDF(
 			// its type matches the function return type.
 			returnCol := physProps.Presentation[0].ID
 			returnColMeta := b.factory.Metadata().ColumnMeta(returnCol)
-			if returnColMeta.Type != f.ResolvedType() {
+			if !returnColMeta.Type.Identical(f.ResolvedType()) {
 				if !cast.ValidCast(returnColMeta.Type, f.ResolvedType(), cast.ContextAssignment) {
 					panic(sqlerrors.NewInvalidAssignmentCastError(
 						returnColMeta.Type, f.ResolvedType(), returnColMeta.Alias))
@@ -975,6 +984,7 @@ func (b *Builder) constructUnary(
 // TypedExprs can refer to columns in the current scope using IndexedVars (@1,
 // @2, etc). When we build a scalar, we have to provide information about these
 // columns.
+// TODO(mgartner): Ordinal column references are deprecated.
 type ScalarBuilder struct {
 	Builder
 	scope scope

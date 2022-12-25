@@ -58,6 +58,10 @@ func interestingGoroutines() map[int64]string {
 			strings.Contains(stack, "sentry-go.(*HTTPTransport).worker") ||
 			// Seems to be gccgo specific.
 			(runtime.Compiler == "gccgo" && strings.Contains(stack, "testing.T.Parallel")) ||
+			// Ignore intentionally long-running logging goroutines that live for the
+			// duration of the process.
+			strings.Contains(stack, "log.flushDaemon") ||
+			strings.Contains(stack, "log.signalFlusher") ||
 			// Below are the stacks ignored by the upstream leaktest code.
 			strings.Contains(stack, "testing.Main(") ||
 			strings.Contains(stack, "testing.tRunner(") ||
@@ -97,8 +101,6 @@ func AfterTest(t testing.TB) func() {
 		return func() {}
 	}
 
-	// Try a best effort GC to help the race tests move along.
-	runtime.GC()
 	orig := interestingGoroutines()
 	return func() {
 		t.Helper()

@@ -29,7 +29,7 @@ import (
 	"github.com/cockroachdb/datadriven"
 	"github.com/cockroachdb/redact"
 	"github.com/stretchr/testify/require"
-	"go.etcd.io/etcd/raft/v3/tracker"
+	"go.etcd.io/raft/v3/tracker"
 )
 
 func TestReplicaRaftOverload_computeExpendableOverloadedFollowers(t *testing.T) {
@@ -118,7 +118,7 @@ func TestReplicaRaftOverload_computeExpendableOverloadedFollowers(t *testing.T) 
 						Match:        match[replDesc.ReplicaID],
 						RecentActive: true,
 						IsLearner:    replDesc.Type == roachpb.LEARNER || replDesc.Type == roachpb.NON_VOTER,
-						Inflights:    tracker.NewInflights(1), // avoid NPE
+						Inflights:    tracker.NewInflights(1, 0), // avoid NPE
 					}
 					m[uint64(replDesc.ReplicaID)] = pr
 				}

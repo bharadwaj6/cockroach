@@ -19,10 +19,11 @@ go_library(
     deps = [
         "//pkg/base",
         "//pkg/kv",
+        "//pkg/multitenant",
         "//pkg/roachpb",
         "//pkg/settings",
+        "//pkg/sql/catalog/catenumpb",
         "//pkg/sql/catalog/colinfo",
-        "//pkg/sql/catalog/descpb",
         "//pkg/sql/execinfra",
         "//pkg/sql/execinfra/execopnode",
         "//pkg/sql/execinfra/execreleasable",

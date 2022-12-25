@@ -41,9 +41,9 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree/treewindow"
 	"github.com/cockroachdb/cockroach/pkg/sql/span"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
-	"github.com/cockroachdb/cockroach/pkg/util"
 	"github.com/cockroachdb/cockroach/pkg/util/encoding"
 	"github.com/cockroachdb/cockroach/pkg/util/errorutil"
+	"github.com/cockroachdb/cockroach/pkg/util/intsets"
 	"github.com/cockroachdb/errors"
 )
 
@@ -297,7 +297,7 @@ func constructSimpleProjectForPlanNode(
 }
 
 func hasDuplicates(cols []exec.NodeColumnOrdinal) bool {
-	var set util.FastIntSet
+	var set intsets.Fast
 	for _, c := range cols {
 		if set.Contains(int(c)) {
 			return true
@@ -1997,10 +1997,6 @@ func (ef *execFactory) ConstructAlterTableUnsplitAll(index cat.Index) (exec.Node
 		return nil, err
 	}
 
-	if !ef.planner.ExecCfg().IsSystemTenant() {
-		return nil, errorutil.UnsupportedWithMultiTenancy(54254)
-	}
-
 	return &unsplitAllNode{
 		tableDesc: index.Table().(*optTable).desc,
 		index:     index.(*optIndex).idx,
@@ -2074,6 +2070,13 @@ func (ef *execFactory) ConstructControlSchedules(
 	return &controlSchedulesNode{
 		rows:    input.(planNode),
 		command: command,
+	}, nil
+}
+
+// ConstructShowCompletions is part of the exec.Factory interface.
+func (ef *execFactory) ConstructShowCompletions(command *tree.ShowCompletions) (exec.Node, error) {
+	return &completionsNode{
+		n: command,
 	}, nil
 }
 

@@ -13,6 +13,7 @@ package logstore
 
 import (
 	"context"
+	"sync"
 	"time"
 
 	"github.com/cockroachdb/cockroach/pkg/keys"
@@ -23,13 +24,14 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/settings/cluster"
 	"github.com/cockroachdb/cockroach/pkg/storage"
 	"github.com/cockroachdb/cockroach/pkg/storage/enginepb"
+	"github.com/cockroachdb/cockroach/pkg/util/envutil"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
 	"github.com/cockroachdb/cockroach/pkg/util/iterutil"
 	"github.com/cockroachdb/cockroach/pkg/util/metric"
 	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
 	"github.com/cockroachdb/errors"
-	"go.etcd.io/etcd/raft/v3"
-	"go.etcd.io/etcd/raft/v3/raftpb"
+	"go.etcd.io/raft/v3"
+	"go.etcd.io/raft/v3/raftpb"
 )
 
 var disableSyncRaftLog = settings.RegisterBoolSetting(
@@ -38,7 +40,7 @@ var disableSyncRaftLog = settings.RegisterBoolSetting(
 	"set to true to disable synchronization on Raft log writes to persistent storage. "+
 		"Setting to true risks data loss or data corruption on server crashes. "+
 		"The setting is meant for internal testing only and SHOULD NOT be used in production.",
-	false,
+	envutil.EnvOrDefaultBool("COCKROACH_DISABLE_RAFT_LOG_SYNCHRONIZATION_UNSAFE", false),
 )
 
 // Ready contains the log entries and state to be saved to stable storage. This
@@ -102,18 +104,26 @@ type LogStore struct {
 	Metrics     Metrics
 }
 
+func newStoreEntriesBatch(eng storage.Engine) storage.Batch {
+	// Use an unindexed batch because we don't need to read our writes, and
+	// it is more efficient.
+	return eng.NewUnindexedBatch(false /* writeOnly */)
+}
+
 // StoreEntries persists newly appended Raft log Entries to the log storage.
 // Accepts the state of the log before the operation, returns the state after.
 // Persists HardState atomically with, or strictly after Entries.
 func (s *LogStore) StoreEntries(
 	ctx context.Context, state RaftState, rd Ready, stats *AppendStats,
 ) (RaftState, error) {
-	// TODO(pavelkalinnikov): Doesn't this comment contradict the code?
-	// Use a more efficient write-only batch because we don't need to do any
-	// reads from the batch. Any reads are performed on the underlying DB.
-	batch := s.Engine.NewUnindexedBatch(false /* writeOnly */)
+	batch := newStoreEntriesBatch(s.Engine)
 	defer batch.Close()
+	return s.storeEntriesAndCommitBatch(ctx, state, rd, stats, batch)
+}
 
+func (s *LogStore) storeEntriesAndCommitBatch(
+	ctx context.Context, state RaftState, rd Ready, stats *AppendStats, batch storage.Batch,
+) (RaftState, error) {
 	prevLastIndex := state.LastIndex
 	if len(rd.Entries) > 0 {
 		stats.Begin = timeutil.Now()
@@ -211,6 +221,10 @@ func (s *LogStore) StoreEntries(
 	return state, nil
 }
 
+var valPool = sync.Pool{
+	New: func() interface{} { return &roachpb.Value{} },
+}
+
 // logAppend adds the given entries to the raft log. Takes the previous log
 // state, and returns the updated state. It's the caller's responsibility to
 // maintain exclusive access to the raft log for the duration of the method
@@ -230,7 +244,9 @@ func logAppend(
 		return prev, nil
 	}
 	var diff enginepb.MVCCStats
-	var value roachpb.Value
+	value := valPool.Get().(*roachpb.Value)
+	value.RawBytes = value.RawBytes[:0]
+	defer valPool.Put(value)
 	for i := range entries {
 		ent := &entries[i]
 		key := keys.RaftLogKeyFromPrefix(raftLogPrefix, ent.Index)
@@ -241,9 +257,9 @@ func logAppend(
 		value.InitChecksum(key)
 		var err error
 		if ent.Index > prev.LastIndex {
-			err = storage.MVCCBlindPut(ctx, rw, &diff, key, hlc.Timestamp{}, hlc.ClockTimestamp{}, value, nil /* txn */)
+			err = storage.MVCCBlindPut(ctx, rw, &diff, key, hlc.Timestamp{}, hlc.ClockTimestamp{}, *value, nil /* txn */)
 		} else {
-			err = storage.MVCCPut(ctx, rw, &diff, key, hlc.Timestamp{}, hlc.ClockTimestamp{}, value, nil /* txn */)
+			err = storage.MVCCPut(ctx, rw, &diff, key, hlc.Timestamp{}, hlc.ClockTimestamp{}, *value, nil /* txn */)
 		}
 		if err != nil {
 			return RaftState{}, err
@@ -308,7 +324,11 @@ func LoadTerm(
 		// sideloaded entries here to keep the term fetching cheap.
 		// TODO(pavelkalinnikov): consider not caching here, after measuring if it
 		// makes any difference.
-		if !SniffSideloadedRaftCommand(entry.Data) {
+		typ, err := raftlog.EncodingOf(entry)
+		if err != nil {
+			return 0, err
+		}
+		if typ != raftlog.EntryEncodingSideloaded {
 			eCache.Add(rangeID, []raftpb.Entry{entry}, false /* truncate */)
 		}
 		return entry.Term, nil
@@ -381,7 +401,11 @@ func LoadEntries(
 		}
 		expectedIndex++
 
-		if SniffSideloadedRaftCommand(ent.Data) {
+		typ, err := raftlog.EncodingOf(ent)
+		if err != nil {
+			return err
+		}
+		if typ == raftlog.EntryEncodingSideloaded {
 			newEnt, err := MaybeInlineSideloadedRaftCommand(
 				ctx, rangeID, ent, sideloaded, eCache,
 			)

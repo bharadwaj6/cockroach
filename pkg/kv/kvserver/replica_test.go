@@ -71,9 +71,9 @@ import (
 	"github.com/kr/pretty"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"go.etcd.io/etcd/raft/v3"
-	"go.etcd.io/etcd/raft/v3/raftpb"
-	"go.etcd.io/etcd/raft/v3/tracker"
+	"go.etcd.io/raft/v3"
+	"go.etcd.io/raft/v3/raftpb"
+	"go.etcd.io/raft/v3/tracker"
 	"golang.org/x/net/trace"
 )
 
@@ -162,6 +162,7 @@ func (tc *testContext) Start(ctx context.Context, t testing.TB, stopper *stop.St
 	// testContext tests like to move the manual clock around and assume that they can write at past
 	// timestamps.
 	cfg.TestingKnobs.DontCloseTimestamps = true
+	cfg.TestingKnobs.DisableMergeWaitForReplicasInit = true
 	tc.StartWithStoreConfig(ctx, t, stopper, cfg)
 }
 
@@ -285,7 +286,7 @@ func (tc *testContext) addBogusReplicaToRangeDesc(
 		Header: roachpb.Header{Timestamp: tc.Clock().Now()},
 	}
 	descKey := keys.RangeDescriptorKey(oldDesc.StartKey)
-	if err := updateRangeDescriptor(ctx, &ba, descKey, dbDescKV.Value.TagAndDataBytes(), &newDesc); err != nil {
+	if err := updateRangeDescriptor(&ba, descKey, dbDescKV.Value.TagAndDataBytes(), &newDesc); err != nil {
 		return roachpb.ReplicaDescriptor{}, err
 	}
 	if err := tc.store.DB().Run(ctx, &ba); err != nil {
@@ -824,10 +825,11 @@ func TestLeaseReplicaNotInDesc(t *testing.T) {
 		},
 	}
 	tc.repl.mu.Lock()
-	_, _, pErr := kvserverbase.CheckForcedErr(
+	fr := kvserverbase.CheckForcedErr(
 		ctx, makeIDKey(), &raftCmd, false, /* isLocal */
 		&tc.repl.mu.state,
 	)
+	pErr := fr.ForcedError
 	tc.repl.mu.Unlock()
 	if _, isErr := pErr.GetDetail().(*roachpb.LeaseRejectedError); !isErr {
 		t.Fatal(pErr)
@@ -14008,7 +14010,7 @@ func TestStoreTenantMetricsAndRateLimiterRefcount(t *testing.T) {
 			Key: leftRepl.Desc().StartKey.AsRawKey(),
 		},
 	}, "testing")
-	require.Nil(t, pErr)
+	require.NoError(t, pErr.GoError())
 
 	// The store metrics no longer track tenant 123.
 	require.Equal(t,

@@ -12,6 +12,7 @@ package scop
 
 import (
 	"github.com/cockroachdb/cockroach/pkg/jobs/jobspb"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catenumpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/schemachanger/scpb"
@@ -440,6 +441,14 @@ type SetIndexName struct {
 	Name    string
 }
 
+// SetConstraintName renames a constraint.
+type SetConstraintName struct {
+	mutationOp
+	TableID      descpb.ID
+	ConstraintID descpb.ConstraintID
+	Name         string
+}
+
 // DeleteDescriptor deletes a descriptor.
 type DeleteDescriptor struct {
 	mutationOp
@@ -619,7 +628,7 @@ type AddColumnToIndex struct {
 	ColumnID     descpb.ColumnID
 	IndexID      descpb.IndexID
 	Kind         scpb.IndexColumn_Kind
-	Direction    catpb.IndexColumn_Direction
+	Direction    catenumpb.IndexColumn_Direction
 	Ordinal      uint32
 	InvertedKind catpb.InvertedIndexColumnKind
 }

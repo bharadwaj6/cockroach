@@ -197,16 +197,12 @@ export class TransactionDetails extends React.Component<
   componentDidMount(): void {
     this.refreshData("");
     this.props.refreshUserSQLRoles();
-    if (!this.props.isTenant) {
-      this.props.refreshNodes();
-    }
+    this.props.refreshNodes();
   }
 
   componentDidUpdate(prevProps: TransactionDetailsProps): void {
     this.getTransactionStateInfo(prevProps.transactionFingerprintId);
-    if (!this.props.isTenant) {
-      this.props.refreshNodes();
-    }
+    this.props.refreshNodes();
   }
 
   onChangeSortSetting = (ss: SortSetting): void => {
@@ -319,11 +315,7 @@ export class TransactionDetails extends React.Component<
             const aggregatedStatements = aggregateStatements(
               statementsForTransaction,
             );
-            populateRegionNodeForStatements(
-              aggregatedStatements,
-              nodeRegions,
-              isTenant,
-            );
+            populateRegionNodeForStatements(aggregatedStatements, nodeRegions);
             const duration = (v: number) => Duration(v * 1e9);
 
             const transactionSampled =

@@ -22,7 +22,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/kv/kvserver/liveness/livenesspb"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
-	"go.etcd.io/etcd/raft/v3"
+	"go.etcd.io/raft/v3"
 )
 
 // ReplicaMetrics contains details on the current status of the replica.
@@ -329,6 +329,14 @@ func (r *Replica) WriteBytesPerSecond() float64 {
 func (r *Replica) ReadBytesPerSecond() float64 {
 	rbps, _ := r.loadStats.readBytes.AverageRatePerSecond()
 	return rbps
+}
+
+// CPUNanosPerSecond tracks the time this replica spent on-processor averaged
+// per second.
+func (r *Replica) CPUNanosPerSecond() float64 {
+	raftCPUNanos, _ := r.loadStats.raftCPUNanos.AverageRatePerSecond()
+	reqCPUNanos, _ := r.loadStats.reqCPUNanos.AverageRatePerSecond()
+	return raftCPUNanos + reqCPUNanos
 }
 
 func (r *Replica) needsSplitBySizeRLocked() bool {

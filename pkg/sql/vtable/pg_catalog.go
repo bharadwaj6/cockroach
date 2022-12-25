@@ -411,6 +411,7 @@ CREATE TABLE pg_catalog.pg_index (
     indrelid OID,
     indnatts INT2,
     indisunique BOOL,
+    indnullsnotdistinct BOOL,
     indisprimary BOOL,
     indisexclusion BOOL,
     indimmediate BOOL,
@@ -508,7 +509,8 @@ CREATE TABLE pg_catalog.pg_namespace (
 	oid OID,
 	nspname NAME NOT NULL,
 	nspowner OID,
-	nspacl STRING[]
+	nspacl STRING[],
+	INDEX (oid)
 )`
 
 // PGCatalogOpclass describes the schema of the pg_catalog.pg_opclass table.
@@ -610,7 +612,8 @@ CREATE TABLE pg_catalog.pg_proc (
 	proconfig STRING[],
 	proacl STRING[],
 	prokind "char",
-	prosupport REGPROC
+	prosupport REGPROC,
+	INDEX(oid)
 )`
 
 // PGCatalogRange describes the schema of the pg_catalog.pg_range table.
@@ -1825,13 +1828,14 @@ CREATE TABLE pg_catalog.pg_statio_user_tables (
 	tidx_blks_hit INT
 )`
 
-// PgCatalogTimezoneNames is an empty table in the pg_catalog that is not implemented yet
+// PgCatalogTimezoneNames describes the schema of pg_catalog.pg_timezone_names.
 const PgCatalogTimezoneNames = `
 CREATE TABLE pg_catalog.pg_timezone_names (
 	name STRING,
 	abbrev STRING,
 	utc_offset INTERVAL,
-	is_dst BOOL
+	is_dst BOOL,
+	INDEX (name)
 )`
 
 // PgCatalogPartitionedTable is an empty table in the pg_catalog that is not implemented yet

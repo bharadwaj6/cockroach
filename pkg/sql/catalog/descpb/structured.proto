@@ -15,9 +15,9 @@ option go_package = "descpb";
 
 import "config/zonepb/zone.proto";
 import "util/hlc/timestamp.proto";
+import "sql/catalog/catenumpb/index.proto";
 import "sql/catalog/catpb/catalog.proto";
 import "sql/catalog/catpb/privilege.proto";
-import "sql/catalog/catpb/index.proto";
 import "sql/catalog/catpb/function.proto";
 import "sql/schemachanger/scpb/scpb.proto";
 import "sql/types/types.proto";
@@ -436,8 +436,8 @@ message IndexDescriptor {
   // EncodingType represents what sort of k/v encoding is used to store this descriptor on disk.
   // As of now, this includes the existing secondary index encoding, or the primary index encoding.
   // N.B. This field is only recognized on secondary indexes.
-  optional uint32 encoding_type = 19
-    [(gogoproto.nullable) = false, (gogoproto.casttype) = "IndexDescriptorEncodingType"];
+  optional uint32 encoding_type = 19 [(gogoproto.nullable) = false,
+                                      (gogoproto.casttype) = "github.com/cockroachdb/cockroach/pkg/sql/catalog/catenumpb.IndexDescriptorEncodingType"];
 
   // Sharded, if it's not the zero value, describes how this index is sharded.
   optional cockroach.sql.catalog.catpb.ShardedDescriptor sharded = 20 [(gogoproto.nullable) = false];
@@ -1367,6 +1367,8 @@ message TypeDescriptor {
     // kind of TypeDescriptor is *never* persisted to disk! If you are here,
     // thinking about using or persisting this value, you should *not* do that!
     TABLE_IMPLICIT_RECORD_TYPE = 3;
+    // Represents a user-defined composite type.
+    COMPOSITE = 4;
     // Add more entries as we support more user defined types.
   }
   optional Kind kind = 5 [(gogoproto.nullable) = false];
@@ -1440,7 +1442,30 @@ message TypeDescriptor {
   // descriptor being changed as part of a declarative schema change.
   optional cockroach.sql.schemachanger.scpb.DescriptorState declarative_schema_changer_state = 17;
 
-  // Next field is 18.
+  // Composite describes a composite type, which is just a stored, labeled tuple
+  // type, like a struct in Go.
+  message Composite {
+    option (gogoproto.equal) = true;
+
+    // CompositeElement describes one element of a composite type.
+    message CompositeElement {
+      option (gogoproto.equal) = true;
+
+      // ElementType is the type of this composite element.
+      optional sql.sem.types.T element_type = 1;
+      // ElementLabel is the label of this composite element.
+      optional string element_label = 2 [(gogoproto.nullable) = false];
+    }
+
+    // Elements is a slice of the fields within this composite type, including
+    // the type and the label.
+    repeated CompositeElement elements = 1 [(gogoproto.nullable) = false];
+  }
+
+  // Composite is the list of fields if this is a composite type.
+  optional Composite composite = 18;
+
+  // Next field is 19.
 }
 
 // SchemaDescriptor represents a physical schema and is stored in a structured

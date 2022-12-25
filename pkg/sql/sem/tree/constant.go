@@ -22,7 +22,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgcode"
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgerror"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
-	"github.com/cockroachdb/cockroach/pkg/util"
+	"github.com/cockroachdb/cockroach/pkg/util/intsets"
 	"github.com/cockroachdb/errors"
 	"github.com/lib/pq/oid"
 )
@@ -62,6 +62,11 @@ var _ Constant = &StrVal{}
 func isConstant(expr Expr) bool {
 	_, ok := expr.(Constant)
 	return ok
+}
+
+func isPlaceholder(expr Expr) bool {
+	_, isPlaceholder := StripParens(expr).(*Placeholder)
+	return isPlaceholder
 }
 
 func typeCheckConstant(
@@ -340,7 +345,7 @@ func (expr *NumVal) ResolveAsType(
 			if strings.EqualFold(expr.origString, "NaN") {
 				// We need to check NaN separately since expr.value is
 				// unknownVal for NaN.
-				// TODO(sql-experience): unknownVal is also used for +Inf and
+				// TODO(sql-sessions): unknownVal is also used for +Inf and
 				// -Inf, so we may need to handle those in the future too.
 				expr.resFloat = DFloat(math.NaN())
 			} else {
@@ -436,7 +441,7 @@ func intersectTypeSlices(xs, ys []*types.T) (out []*types.T) {
 // The function takes a slice of Exprs and indexes, but expects all the indexed
 // Exprs to wrap a Constant. The reason it does no take a slice of Constants
 // instead is to avoid forcing callers to allocate separate slices of Constant.
-func commonConstantType(vals []Expr, idxs util.FastIntSet) (*types.T, bool) {
+func commonConstantType(vals []Expr, idxs intsets.Fast) (*types.T, bool) {
 	var candidates []*types.T
 
 	for i, ok := idxs.Next(0); ok; i, ok = idxs.Next(i + 1) {
@@ -604,7 +609,11 @@ func (expr *StrVal) ResolveAsType(
 			expr.resBytes = DBytes(expr.s)
 			return &expr.resBytes, nil
 		case types.EnumFamily:
-			return MakeDEnumFromPhysicalRepresentation(typ, []byte(expr.s))
+			e, err := MakeDEnumFromPhysicalRepresentation(typ, []byte(expr.s))
+			if err != nil {
+				return nil, err
+			}
+			return NewDEnum(e), nil
 		case types.UuidFamily:
 			return ParseDUuidFromBytes([]byte(expr.s))
 		case types.StringFamily:

@@ -19,7 +19,6 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/privilege"
 	"github.com/cockroachdb/cockroach/pkg/sql/schemachanger/scpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/catid"
-	"github.com/cockroachdb/cockroach/pkg/sql/sem/eval"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
 	"github.com/cockroachdb/cockroach/pkg/util/hlc"
@@ -58,7 +57,7 @@ func CreateImplicitRecordTypeFromTableDesc(
 	typs := make([]*types.T, len(cols))
 	names := make([]string, len(cols))
 	for i, col := range cols {
-		if col.GetType().UserDefined() && !col.GetType().IsHydrated() {
+		if !ColumnIsHydrated(col) {
 			return nil, errors.AssertionFailedf("encountered unhydrated col %s while creating implicit record type from"+
 				" table %s", col.ColName(), descriptor.GetName())
 		}
@@ -81,13 +80,14 @@ func CreateImplicitRecordTypeFromTableDesc(
 		Name: &types.UserDefinedTypeName{
 			Name: descriptor.GetName(),
 		},
-		Version: uint32(descriptor.GetVersion()),
+		Version:            uint32(descriptor.GetVersion()),
+		ImplicitRecordType: true,
 	}
 
 	// Note: Implicit types for virtual tables are hardcoded to have USAGE
 	// privileges and this can't be modified. The virtual table itself does have
 	// synthetic privileges (as of v22.2), but accessing those requires a planner
-	// by using GetPrivilegeDescriptor(ctx, planner).
+	// by using getPrivilegeDescriptor.
 	// It is fine to hardcode USAGE for implicit types for virtual tables since
 	// nothing about those types is sensitive.
 	tablePrivs := descriptor.GetPrivileges()
@@ -109,6 +109,19 @@ func CreateImplicitRecordTypeFromTableDesc(
 			Version:    tablePrivs.Version,
 		},
 	}, nil
+}
+
+func TableIsHydrated(tbl catalog.TableDescriptor) bool {
+	for _, col := range tbl.VisibleColumns() {
+		if !ColumnIsHydrated(col) {
+			return false
+		}
+	}
+	return true
+}
+
+func ColumnIsHydrated(col catalog.Column) bool {
+	return !col.GetType().UserDefined() || col.GetType().IsHydrated()
 }
 
 // GetName implements the Namespace interface.
@@ -384,16 +397,8 @@ func (v TableImplicitRecordType) GetDeclarativeSchemaChangerState() *scpb.Descri
 	return nil
 }
 
-// GetObjectType implements the PrivilegeObject interface.
+// GetObjectType implements the Object interface.
 func (v TableImplicitRecordType) GetObjectType() privilege.ObjectType {
 	v.panicNotSupported("GetObjectType")
 	return ""
-}
-
-// GetPrivilegeDescriptor implements the PrivilegeObject interface.
-func (v TableImplicitRecordType) GetPrivilegeDescriptor(
-	ctx context.Context, planner eval.Planner,
-) (*catpb.PrivilegeDescriptor, error) {
-	v.panicNotSupported("GetPrivilegeDescriptor")
-	return nil, nil
 }

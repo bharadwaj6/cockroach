@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/cockroachdb/cockroach/pkg/keys"
+	"github.com/cockroachdb/cockroach/pkg/multitenant"
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/server/telemetry"
 	"github.com/cockroachdb/cockroach/pkg/settings"
@@ -39,6 +40,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/stmtdiagnostics"
 	"github.com/cockroachdb/cockroach/pkg/util"
 	"github.com/cockroachdb/cockroach/pkg/util/buildutil"
+	"github.com/cockroachdb/cockroach/pkg/util/intsets"
 	"github.com/cockroachdb/cockroach/pkg/util/log"
 	"github.com/cockroachdb/cockroach/pkg/util/tracing"
 	"github.com/cockroachdb/cockroach/pkg/util/tracing/tracingpb"
@@ -254,7 +256,8 @@ func (ih *instrumentationHelper) Setup(
 	ih.codec = cfg.Codec
 	ih.origCtx = ctx
 	ih.evalCtx = p.EvalContext()
-	ih.isTenant = cfg.DistSQLSrv != nil && cfg.DistSQLSrv.TenantCostController != nil
+	ih.isTenant = multitenant.TenantRUEstimateEnabled.Get(cfg.SV()) && cfg.DistSQLSrv != nil &&
+		cfg.DistSQLSrv.TenantCostController != nil
 
 	switch ih.outputMode {
 	case explainAnalyzeDebugOutput:
@@ -665,7 +668,7 @@ func (m execNodeTraceMetadata) annotateExplain(
 			var nodeStats exec.ExecutionStats
 
 			incomplete := false
-			var nodes util.FastIntSet
+			var nodes intsets.Fast
 			regionsMap := make(map[string]struct{})
 			for _, c := range components {
 				if c.Type == execinfrapb.ComponentID_PROCESSOR {
@@ -735,9 +738,7 @@ func (m execNodeTraceMetadata) annotateExplain(
 func (ih *instrumentationHelper) SetIndexRecommendations(
 	ctx context.Context, idxRec *idxrecommendations.IndexRecCache, planner *planner, isInternal bool,
 ) {
-	opc := planner.optPlanningCtx
-	opc.reset(ctx)
-	stmtType := opc.p.stmt.AST.StatementType()
+	stmtType := planner.stmt.AST.StatementType()
 
 	reset := false
 	var recommendations []indexrec.Rec
@@ -748,6 +749,8 @@ func (ih *instrumentationHelper) SetIndexRecommendations(
 		stmtType,
 		isInternal,
 	) {
+		opc := &planner.optPlanningCtx
+		opc.reset(ctx)
 		f := opc.optimizer.Factory()
 		evalCtx := opc.p.EvalContext()
 		f.Init(ctx, evalCtx, opc.catalog)

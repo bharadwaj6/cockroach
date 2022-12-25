@@ -23,6 +23,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/roachpb"
 	"github.com/cockroachdb/cockroach/pkg/security/username"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog"
+	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catenumpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/catpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/descpb"
 	"github.com/cockroachdb/cockroach/pkg/sql/catalog/resolver"
@@ -147,15 +148,7 @@ func (os *optSchema) Name() *cat.SchemaName {
 func (os *optSchema) GetDataSourceNames(
 	ctx context.Context,
 ) ([]cat.DataSourceName, descpb.IDs, error) {
-	return resolver.GetObjectNamesAndIDs(
-		ctx,
-		os.planner.Txn(),
-		os.planner,
-		os.planner.ExecCfg().Codec,
-		os.database,
-		os.name.Schema(),
-		true, /* explicitPrefix */
-	)
+	return os.planner.GetObjectNamesAndIDs(ctx, os.database, os.schema)
 }
 
 func (os *optSchema) getDescriptorForPermissionsCheck() catalog.Descriptor {
@@ -270,10 +263,11 @@ func (oc *optCatalog) ResolveIndex(
 			ctx,
 			oc.planner,
 			name,
-			oc.planner.Txn(),
-			oc.planner.EvalContext().Codec,
-			true, /* required */
-			true, /* requireActiveIndex */
+			tree.IndexLookupFlags{
+				Required:              true,
+				IncludeNonActiveIndex: flags.IncludeNonActiveIndexes,
+				IncludeOfflineTable:   flags.IncludeOfflineTables,
+			},
 		)
 	})
 	if err != nil {
@@ -444,7 +438,9 @@ func (oc *optCatalog) fullyQualifiedNameWithTxn(
 	}
 
 	dbID := desc.GetParentID()
-	dbDesc, err := oc.planner.Descriptors().Direct().MustGetDatabaseDescByID(ctx, txn, dbID)
+	_, dbDesc, err := oc.planner.Descriptors().GetImmutableDatabaseByID(
+		ctx, txn, dbID, tree.DatabaseLookupFlags{AvoidLeased: true},
+	)
 	if err != nil {
 		return cat.DataSourceName{}, err
 	}
@@ -454,7 +450,9 @@ func (oc *optCatalog) fullyQualifiedNameWithTxn(
 	if scID == keys.PublicSchemaID {
 		scName = tree.PublicSchemaName
 	} else {
-		scDesc, err := oc.planner.Descriptors().Direct().MustGetSchemaDescByID(ctx, txn, scID)
+		scDesc, err := oc.planner.Descriptors().GetImmutableSchemaByID(
+			ctx, txn, scID, tree.SchemaLookupFlags{AvoidLeased: true},
+		)
 		if err != nil {
 			return cat.DataSourceName{}, err
 		}
@@ -1589,7 +1587,7 @@ func (oi *optIndex) NonInvertedPrefixColumnCount() int {
 func (oi *optIndex) Column(i int) cat.IndexColumn {
 	ord := oi.columnOrds[i]
 	// Only key columns have a direction.
-	descending := i < oi.idx.NumKeyColumns() && oi.idx.GetKeyColumnDirection(i) == catpb.IndexColumn_DESC
+	descending := i < oi.idx.NumKeyColumns() && oi.idx.GetKeyColumnDirection(i) == catenumpb.IndexColumn_DESC
 	return cat.IndexColumn{
 		Column:     oi.tab.Column(ord),
 		Descending: descending,

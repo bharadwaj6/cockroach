@@ -22,7 +22,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/pgwire/pgerror"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/volatility"
 	"github.com/cockroachdb/cockroach/pkg/sql/types"
-	"github.com/cockroachdb/cockroach/pkg/util"
+	"github.com/cockroachdb/cockroach/pkg/util/intsets"
 	"github.com/cockroachdb/errors"
 	"github.com/cockroachdb/redact"
 	"github.com/lib/pq/oid"
@@ -303,11 +303,7 @@ var _ TypeList = HomogeneousType{}
 var _ TypeList = VariadicType{}
 
 // ParamTypes is a list of function parameter names and their types.
-// TODO(chengxiong): change ParamTypes to []ParamType.
-type ParamTypes []struct {
-	Name string
-	Typ  *types.T
-}
+type ParamTypes []ParamType
 
 // ParamType encapsulate a function parameter name and type.
 type ParamType struct {
@@ -568,9 +564,9 @@ type overloadTypeChecker struct {
 	overloadIdxs    []uint8 // index into overloads
 	exprs           []Expr
 	typedExprs      []TypedExpr
-	resolvableIdxs  util.FastIntSet // index into exprs/typedExprs
-	constIdxs       util.FastIntSet // index into exprs/typedExprs
-	placeholderIdxs util.FastIntSet // index into exprs/typedExprs
+	resolvableIdxs  intsets.Fast // index into exprs/typedExprs
+	constIdxs       intsets.Fast // index into exprs/typedExprs
+	placeholderIdxs intsets.Fast // index into exprs/typedExprs
 	overloadsIdxArr [16]uint8
 }
 
@@ -621,9 +617,9 @@ func (s *overloadTypeChecker) release() {
 	}
 	s.typedExprs = s.typedExprs[:0]
 	s.overloadIdxs = s.overloadIdxs[:0]
-	s.resolvableIdxs = util.FastIntSet{}
-	s.constIdxs = util.FastIntSet{}
-	s.placeholderIdxs = util.FastIntSet{}
+	s.resolvableIdxs = intsets.Fast{}
+	s.constIdxs = intsets.Fast{}
+	s.placeholderIdxs = intsets.Fast{}
 	overloadTypeCheckerPool.Put(s)
 }
 
@@ -677,9 +673,7 @@ func (s *overloadTypeChecker) typeCheckOverloadedExprs(
 	} else {
 		s.typedExprs = make([]TypedExpr, len(s.exprs))
 	}
-	s.constIdxs, s.placeholderIdxs, s.resolvableIdxs = typeCheckSplitExprs(
-		semaCtx, s.exprs,
-	)
+	s.constIdxs, s.placeholderIdxs, s.resolvableIdxs = typeCheckSplitExprs(s.exprs)
 
 	// If no overloads are provided, just type check parameters and return.
 	if numOverloads == 0 {
@@ -724,8 +718,18 @@ func (s *overloadTypeChecker) typeCheckOverloadedExprs(
 	// out impossible candidates based on identical parameters. For instance,
 	// f(int, float) is not a possible candidate for the expression f($1, $1).
 
-	// Filter out overloads on resolved types.
+	// Filter out overloads on resolved types. This includes resolved placeholders
+	// and any other resolvable exprs.
+	var typeableIdxs intsets.Fast
 	for i, ok := s.resolvableIdxs.Next(0); ok; i, ok = s.resolvableIdxs.Next(i + 1) {
+		typeableIdxs.Add(i)
+	}
+	for i, ok := s.placeholderIdxs.Next(0); ok; i, ok = s.placeholderIdxs.Next(i + 1) {
+		if !semaCtx.isUnresolvedPlaceholder(s.exprs[i]) {
+			typeableIdxs.Add(i)
+		}
+	}
+	for i, ok := typeableIdxs.Next(0); ok; i, ok = typeableIdxs.Next(i + 1) {
 		paramDesired := types.Any
 
 		// If all remaining candidates require the same type for this parameter,
@@ -787,10 +791,10 @@ func (s *overloadTypeChecker) typeCheckOverloadedExprs(
 	}
 
 	var homogeneousTyp *types.T
-	if !s.resolvableIdxs.Empty() {
-		idx, _ := s.resolvableIdxs.Next(0)
+	if !typeableIdxs.Empty() {
+		idx, _ := typeableIdxs.Next(0)
 		homogeneousTyp = s.typedExprs[idx].ResolvedType()
-		for i, ok := s.resolvableIdxs.Next(idx); ok; i, ok = s.resolvableIdxs.Next(i + 1) {
+		for i, ok := typeableIdxs.Next(idx); ok; i, ok = typeableIdxs.Next(i + 1) {
 			if !homogeneousTyp.Equivalent(s.typedExprs[i].ResolvedType()) {
 				homogeneousTyp = nil
 				break
@@ -1194,8 +1198,9 @@ func defaultTypeCheck(
 	}
 	for i, ok := s.placeholderIdxs.Next(0); ok; i, ok = s.placeholderIdxs.Next(i + 1) {
 		if errorOnPlaceholders {
-			_, err := s.exprs[i].TypeCheck(ctx, semaCtx, types.Any)
-			return err
+			if _, err := s.exprs[i].TypeCheck(ctx, semaCtx, types.Any); err != nil {
+				return err
+			}
 		}
 		// If we dont want to error on args, avoid type checking them without a desired type.
 		s.typedExprs[i] = StripParens(s.exprs[i]).(*Placeholder)
@@ -1265,6 +1270,9 @@ func checkReturnPlaceholdersAtIdx(
 				return false, nil
 			}
 			return false, err
+		}
+		if typ.ResolvedType().IsAmbiguous() {
+			return false, nil
 		}
 		s.typedExprs[i] = typ
 	}

@@ -11,6 +11,7 @@ package streamingest
 import (
 	"context"
 
+	"github.com/cockroachdb/cockroach/pkg/ccl/streamingccl/replicationutils"
 	"github.com/cockroachdb/cockroach/pkg/ccl/utilccl"
 	"github.com/cockroachdb/cockroach/pkg/jobs/jobspb"
 	"github.com/cockroachdb/cockroach/pkg/kv"
@@ -32,14 +33,17 @@ type streamIngestManagerImpl struct {
 func (r *streamIngestManagerImpl) CompleteStreamIngestion(
 	ctx context.Context, ingestionJobID jobspb.JobID, cutoverTimestamp hlc.Timestamp,
 ) error {
-	return completeStreamIngestion(ctx, r.evalCtx, r.txn, ingestionJobID, cutoverTimestamp)
+	jobRegistry := r.evalCtx.Planner.ExecutorConfig().(*sql.ExecutorConfig).JobRegistry
+	return completeStreamIngestion(ctx, jobRegistry, r.txn, ingestionJobID, cutoverTimestamp)
 }
 
 // GetStreamIngestionStats implements streaming.StreamIngestManager interface.
 func (r *streamIngestManagerImpl) GetStreamIngestionStats(
-	ctx context.Context, ingestionJobID jobspb.JobID,
+	ctx context.Context,
+	streamIngestionDetails jobspb.StreamIngestionDetails,
+	jobProgress jobspb.Progress,
 ) (*streampb.StreamIngestionStats, error) {
-	return getStreamIngestionStats(ctx, r.evalCtx, r.txn, ingestionJobID)
+	return replicationutils.GetStreamIngestionStats(ctx, streamIngestionDetails, jobProgress)
 }
 
 func newStreamIngestManagerWithPrivilegesCheck(

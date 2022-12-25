@@ -96,6 +96,10 @@ const (
 	CrdbInternalBackwardDependenciesTableID
 	CrdbInternalBuildInfoTableID
 	CrdbInternalBuiltinFunctionsTableID
+	CrdbInternalCatalogCommentsTableID
+	CrdbInternalCatalogDescriptorTableID
+	CrdbInternalCatalogNamespaceTableID
+	CrdbInternalCatalogZonesTableID
 	CrdbInternalClusterContendedIndexesViewID
 	CrdbInternalClusterContendedKeysViewID
 	CrdbInternalClusterContendedTablesViewID
@@ -123,9 +127,11 @@ const (
 	CrdbInternalGossipNetworkTableID
 	CrdbInternalTransactionContentionEvents
 	CrdbInternalIndexColumnsTableID
+	CrdbInternalIndexSpansTableID
 	CrdbInternalIndexUsageStatisticsTableID
 	CrdbInternalInflightTraceSpanTableID
 	CrdbInternalJobsTableID
+	CrdbInternalSystemJobsTableID
 	CrdbInternalKVNodeStatusTableID
 	CrdbInternalKVStoreStatusTableID
 	CrdbInternalLeasesTableID
@@ -139,7 +145,6 @@ const (
 	CrdbInternalNodeStmtStatsTableID
 	CrdbInternalNodeTxnStatsTableID
 	CrdbInternalPartitionsTableID
-	CrdbInternalPredefinedCommentsTableID
 	CrdbInternalRangesNoLeasesTableID
 	CrdbInternalRangesViewID
 	CrdbInternalRuntimeInfoTableID
@@ -149,6 +154,7 @@ const (
 	CrdbInternalStmtStatsTableID
 	CrdbInternalTableColumnsTableID
 	CrdbInternalTableIndexesTableID
+	CrdbInternalTableSpansTableID
 	CrdbInternalTablesTableID
 	CrdbInternalTablesTableLastStatsID
 	CrdbInternalTransactionStatsTableID
